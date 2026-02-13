@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Sign in</title>
+  <script> src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@2.38.3/lib/msal-browser.min.js"</script>
+  <style>body{font-family:system-ui;margin:4rem;}</style>
+</head>
+<body>
+  <h1>Sign in</h1>
+  <button id="btnLogin">Continue with Microsoft</button>
+  <script>
+    const msalConfig = {
+      auth: {
+        clientId: "YOUR_CLIENT_ID",
+        // Only organisational accounts
+        authority: "https://login.microsoftonline.com/organizations",
+        redirectUri: window.location.origin + "/login",
+        postLogoutRedirectUri: window.location.origin + "/login",
+        navigateToLoginRequestUrl: false
+      },
+      cache: { cacheLocation: "sessionStorage" }
+    };
+    const msalInstance = new msal.PublicClientApplication(msalConfig);
+
+    // Required in redirect flow to complete the auth code exchange
+    msalInstance.handleRedirectPromise().then((result) => {
+      const account = result?.account || msalInstance.getAllAccounts()[0];
+      if (account) {
+        // Persist minimal session (you may mint your own session cookie via your API instead)
+        sessionStorage.setItem("account", JSON.stringify(account));
+        // Go to your app shell
+        window.location.replace("/app");
+      }
+    });
+
+    document.getElementById("btnLogin").addEventListener("click", () => {
+      msalInstance.loginRedirect({
+        scopes: ["openid", "profile", "email"] // add "User.Read" if you want MS Graph
+      });
+    });
+  </script>
+</body>
+</html>
