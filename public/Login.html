@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Sign in</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="login.css">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+</head>
+<body>
+  <main class="login-page">
+    <header class="site-brand-wrap">
+      <a class="site-brand d-flex align-items-center gap-2" href="/">
+        <i class="bi bi-grid-1x2-fill site-brand-icon"></i>
+        <span class="site-brand-text">Training Manager</span>
+      </a>
+    </header>
+
+    <div class="login-card">
+      <h1 class="login-title">Sign in</h1>
+      <form id="loginForm" class="d-flex flex-column gap-2">
+        <input id="email" type="email" placeholder="Email" required />
+        <input id="password" type="password" placeholder="Password" required />
+        <div class="d-flex gap-2">
+          <button type="submit" class="btn-primary">Sign in</button>
+          <button type="button" id="btnOpenRegister" class="btn-light">Register</button>
+        </div>
+      </form>
+
+      <!-- Register modal -->
+      <div id="registerModal" class="modal-overlay">
+        <div class="modal-box">
+          <button id="btnCloseRegister" type="button" class="modal-close" aria-label="Close">×</button>
+          <h2 class="login-title" style="text-align:left;">Create an account</h2>
+
+          <form id="registerForm" class="d-flex flex-column gap-2">
+            <input id="regName" type="text" placeholder="Full name" required/>
+            <input id="regEmail" type="email" placeholder="Email" required />
+            <input id="regPassword" type="password" placeholder="Password" required />
+            <div class="d-flex gap-2">
+              <button type="submit" class="btn-primary">Register</button>
+              <button type="button" id="btnSwitchToLogin" class="btn-light">Back to login</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  </main>
+
+<script>
+/* ==========================
+      Login & Register
+========================== */
+
+const API = "http://127.0.0.1:5000";
+
+/* ——— Modal Controls ——— */
+const loginForm = document.getElementById('loginForm');
+const registerForm = document.getElementById('registerForm');
+const registerModal = document.getElementById('registerModal');
+
+document.getElementById('btnOpenRegister').addEventListener('click', () => {
+  registerModal.classList.add('open');
+  document.getElementById('regName').focus();
+});
+
+document.getElementById('btnCloseRegister').addEventListener('click', () => {
+  registerModal.classList.remove('open');
+});
+
+document.getElementById('btnSwitchToLogin').addEventListener('click', () => {
+  registerModal.classList.remove('open');
+});
+
+registerModal.addEventListener('click', (ev) => {
+  if (ev.target === registerModal) registerModal.classList.remove('open');
+});
+
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape') registerModal.classList.remove('open');
+});
+
+/* ==========================
+      LOGIN (FIXED)
+========================== */
+loginForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+
+  const email = document.getElementById('email').value.trim();
+  const password = document.getElementById('password').value.trim();
+
+  try {
+    const resp = await fetch(`${API}/api/auth/login`, {
+      method: 'POST',
+      credentials: 'include', 
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password })
+    });
+
+    const data = await resp.json();
+    if (!resp.ok) return alert(data.error || "Invalid login");
+
+    sessionStorage.setItem("account", JSON.stringify({
+      email: data.user.email,
+      username: data.user.username,
+      user_id: data.user.user_id,
+      person_id: data.user.person_id,
+      role: data.user.role || "user"
+    }));
+
+    sessionStorage.setItem("profile", JSON.stringify(data.user));
+
+    window.location.replace("index.html#/dashboard");
+
+  } catch (err) {
+    console.error(err);
+    alert("Login error");
+  }
+});
+
+/* ==========================
+      REGISTER (FIXED)
+========================== */
+registerForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+
+  const username = document.getElementById('regName').value.trim();
+  const email = document.getElementById('regEmail').value.trim();
+  const password = document.getElementById('regPassword').value.trim();
+
+  try {
+    const resp = await fetch(`${API}/api/auth/register`, {
+      method: 'POST',
+      credentials: 'include',  
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password, username })
+    });
+
+    const data = await resp.json();
+    if (!resp.ok) return alert(data.error || "Registration failed");
+
+    // Auto-login 
+    const loginResp = await fetch(`${API}/api/auth/login`, {
+      method: 'POST',
+      credentials: 'include',  
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password })
+    });
+
+    const loginData = await loginResp.json();
+    if (!loginResp.ok) return alert(loginData.error || "Auto-login failed");
+
+    sessionStorage.setItem("account", JSON.stringify({
+      email: loginData.user.email,
+      username: loginData.user.username,
+      user_id: loginData.user.user_id,
+      person_id: loginData.user.person_id,
+      role: loginData.user.role || "user"
+    }));
+
+    sessionStorage.setItem("profile", JSON.stringify(loginData.user));
+
+    registerModal.classList.remove('open');
+    window.location.replace('index.html#/dashboard');
+
+  } catch (err) {
+    console.error(err);
+    alert("Registration error");
+  }
+});
+</script>
+
+</body>
+</html>
