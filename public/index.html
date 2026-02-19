@@ -597,11 +597,17 @@
     <!-- ROLE SELECT (admins only) -->
     <div id="roleControl" class="mt-2 d-none">
       <label class="form-label small mb-1">Role</label>
-      <select class="form-select form-select-sm w-auto" id="personRoleSelect">
-        <option value="user">User</option>
-        <option value="manager">Manager</option>
-        <option value="admin">Admin</option>
-      </select>
+      <div class="d-flex gap-2 align-items-center">
+        <select class="form-select form-select-sm w-auto" id="personRoleSelect">
+          <option value="user">User</option>
+          <option value="manager">Manager</option>
+          <option value="admin">Admin</option>
+        </select>
+
+        <button class="btn btn-sm btn-primary" id="btnSaveRole">
+          <i class="bi bi-save"></i> Save
+        </button>
+      </div>
     </div>
 
     <!-- ICS buttons (internal + 3rd-party combined) -->
@@ -813,5 +819,17 @@
       window.location.href = 'Login.html';
     });
   </script>
+
+  <div class="modal fade" id="evidenceModal" tabindex="-1">
+  <div class="modal-dialog modal-xl modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Evidence File</h5>
+        <button class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="evidenceBody" style="max-height:80vh; overflow:auto;"></div>
+    </div>
+  </div>
+</div>
 </body>
 </html>

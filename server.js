@@ -409,12 +409,31 @@ app.get(
             tr.expiry_date   AS expires,
             tr.status,
             tr.assessor      AS assessor
-         FROM training_records tr
-         JOIN courses c ON c.course_id = tr.course_id
+        FROM training_records tr
+        JOIN courses c ON c.course_id = tr.course_id
         WHERE tr.person_id = ?
         ORDER BY tr.completion_date DESC`,
         [personId]
       );
+
+      // Load attachments for all training records
+      const attachments = await q(
+        `SELECT training_record_id, file_path, mime_type
+          FROM attachments
+          WHERE training_record_id IN (
+            SELECT training_record_id 
+            FROM training_records 
+            WHERE person_id=?
+          )`,
+        [personId]
+      );
+
+      // Attach them to training objects
+      training.forEach(r => {
+        const a = attachments.find(x => x.training_record_id === r.training_record_id);
+        r.file_path = a?.file_path || null;
+        r.mime_type = a?.mime_type || null;
+      });
 
       const thirdparty = await q(
         `SELECT 
@@ -423,8 +442,10 @@ app.get(
             provider, 
             completion_date, 
             expiry_date, 
-            notes
-         FROM third_party_certifications
+            notes,
+            file_path,       
+            mime_type           
+        FROM third_party_certifications
         WHERE person_id = ?
         ORDER BY completion_date DESC`,
         [personId]

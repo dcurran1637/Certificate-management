@@ -46,6 +46,25 @@ function statusBadge(status) {
   return `<span class="badge text-bg-${m.cls}">${esc(m.text)}</span>`;
 }
 
+function downloadCsv(filename, rows) {
+  const csv = rows.map(row =>
+    row.map(value => `"${String(value).replace(/"/g, '""')}"`).join(",")
+  ).join("\n");
+
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 /* -------------------- fetchJSON helper ------------------ */
 async function fetchJSON(url, options={}) {
   options.credentials = "include";
@@ -178,6 +197,30 @@ document.addEventListener("DOMContentLoaded", () => {
   document.addEventListener("click",(e)=>{
     if(e.target.id==="btnAddThirdParty") openThirdPartyModal();
   });
+});
+
+document.addEventListener("click", async (e) => {
+  if (e.target.closest("#btnSaveRole")) {
+    const select = document.querySelector("#personRoleSelect");
+    const personId = Number(select.dataset.personId);
+    const newRole = select.value;
+
+    try {
+      await fetchJSON(`${API}/api/people/${personId}/role`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ role: newRole })
+      });
+
+      showToast("Updated", "Role updated successfully", "success");
+      // Reload profile so the UI reflects changes
+      openPersonProfile(personId);
+
+    } catch (err) {
+      console.error(err);
+      showToast("Error", "Failed to save role", "danger");
+    }
+  }
 });
 
 /* ========================================================
@@ -390,7 +433,7 @@ async function openPersonProfile(personId) {
     $("#personName").textContent = data.person.name;
     $("#personEmail").textContent = data.person.email;
 
-    /* ---------- ROLE SELECTOR (RESTORED) ---------- */
+    /* ---------- ROLE SELECTOR ---------- */
     if (isAdmin()) {
       $("#roleControl").classList.remove("d-none");
       $("#personRoleSelect").value = data.person.role ?? "user";
@@ -412,110 +455,123 @@ async function openPersonProfile(personId) {
       tB.innerHTML = "";
     } else {
       hide($("#personTrainingEmpty"));
+
       tB.innerHTML = data.training.map(r => `
-  <tr data-record-id="${r.training_record_id}">
-    <td>${esc(r.course)}</td>
-    <td>${fmt(r.completed)}</td>
-    <td>${fmt(r.expires)}</td>
-    <td>${esc(r.assessor || "")}</td>
-    <td>${statusBadge(r.status)}</td>
-    <td class="text-end">
-      ${isAdminOrManager() ? `
-        <button class="btn btn-sm btn-outline-primary me-1" data-action="edit-record">
-          <i class="bi bi-pencil"></i>
-        </button>
-        <button class="btn btn-sm btn-outline-danger" data-action="delete-record">
-          <i class="bi bi-trash"></i>
-        </button>
-      ` : ""}
-    </td>
-  </tr>
-`).join("");
+        <tr data-record-id="${r.training_record_id}">
+          <td>${esc(r.course)}</td>
+          <td>${fmt(r.completed)}</td>
+          <td>${fmt(r.expires)}</td>
+          <td>${esc(r.assessor || "")}</td>
+          <td>${statusBadge(r.status)}</td>
+          <td class="text-end">
+            ${r.file_path ? `
+              <button class="btn btn-sm btn-outline-secondary me-1" 
+                      data-action="view-evidence" 
+                      data-path="${r.file_path}"
+                      title="View evidence">
+                <i class="bi bi-file-earmark-text"></i>
+              </button>
+            ` : ""}
+            ${isAdminOrManager() ? `
+              <button class="btn btn-sm btn-outline-primary me-1" data-action="edit-record">
+                <i class="bi bi-pencil"></i>
+              </button>
+              <button class="btn btn-sm btn-outline-danger" data-action="delete-record">
+                <i class="bi bi-trash"></i>
+              </button>
+            ` : ""}
+          </td>
+        </tr>
+      `).join("");
     }
 
+    /* ---------- THIRD-PARTY LIST ---------- */
+    hide($("#personThirdSpinner"));
+    const t3 = $("#personThirdTbody");
 
-hide($("#personThirdSpinner"));
-const t3 = $("#personThirdTbody");
+    if (!data.thirdparty.length) {
+      show($("#personThirdEmpty"));
+      t3.innerHTML = "";
+    } else {
+      hide($("#personThirdEmpty"));
+      t3.innerHTML = data.thirdparty.map(c => `
+        <tr data-cert-id="${c.cert_id}">
+          <td>${esc(c.title)}</td>
+          <td>${esc(c.provider)}</td>
+          <td>${fmt(c.completion_date)}</td>
+          <td>${fmt(c.expiry_date)}</td>
+          <td class="text-end">
 
-if (!data.thirdparty.length) {
-  show($("#personThirdEmpty"));
-  t3.innerHTML = "";
-} else {
-  hide($("#personThirdEmpty"));
-  t3.innerHTML = data.thirdparty.map(c => `
-    <tr data-cert-id="${c.cert_id}">
-      <td>${esc(c.title)}</td>
-      <td>${esc(c.provider)}</td>
-      <td>${fmt(c.completion_date)}</td>
-      <td>${fmt(c.expiry_date)}</td>
-      <td class="text-end">
-        ${isAdminOrManager() ? `
-          <a 
-            class="btn btn-sm btn-outline-secondary me-1" 
-            href="${API}/api/thirdparty/${c.cert_id}/ics" 
-            target="_blank" 
-            title="Add to calendar (ICS)">
-            <i class="bi bi-calendar-plus"></i>
-          </a>
+            ${c.file_path ? `
+              <button class="btn btn-sm btn-outline-secondary me-1"
+                      data-action="view-evidence"
+                      data-path="${c.file_path}"
+                      title="View evidence">
+                <i class="bi bi-file-earmark-text"></i>
+              </button>
+            ` : ""}
 
-          <button 
-            class="btn btn-sm btn-outline-primary me-1" 
-            data-action="edit-third" 
-            title="Edit certificate">
-            <i class="bi bi-pencil"></i>
-          </button>
+            ${isAdminOrManager() ? `
+              <a class="btn btn-sm btn-outline-secondary me-1" 
+                 href="${API}/api/thirdparty/${c.cert_id}/ics" 
+                 target="_blank">
+                 <i class="bi bi-calendar-plus"></i>
+              </a>
 
-          <button 
-            class="btn btn-sm btn-outline-danger" 
-            data-action="delete-third" 
-            title="Delete certificate">
-            <i class="bi bi-trash"></i>
-          </button>
-        ` : ""}
-      </td>
-    </tr>
-  `).join("");
-}
+              <button class="btn btn-sm btn-outline-primary me-1" data-action="edit-third">
+                <i class="bi bi-pencil"></i>
+              </button>
 
+              <button class="btn btn-sm btn-outline-danger" data-action="delete-third">
+                <i class="bi bi-trash"></i>
+              </button>
+            ` : ""}
+          </td>
+        </tr>
+      `).join("");
+    }
 
     /* ---------- TRAINING ACTION HANDLERS ---------- */
     $("#personTrainingTbody").onclick = (e) => {
-      if (!isAdminOrManager()) return;
+      const btn = e.target.closest("[data-action]");
+      if (!btn) return;
 
       const row = e.target.closest("tr[data-record-id]");
       if (!row) return;
       const recordId = row.dataset.recordId;
 
-      const btn = e.target.closest("[data-action]");
-      if (!btn) return;
-
-      if (btn.dataset.action === "edit-record") {
-        openEditRecordModal(recordId);
+      if (btn.dataset.action === "view-evidence") {
+        openEvidenceViewer(btn.dataset.path); 
+        return;
       }
+
+      if (!isAdminOrManager()) return;
+
+      if (btn.dataset.action === "edit-record") openEditRecordModal(recordId);
       if (btn.dataset.action === "delete-record") {
-        confirmDelete("record", recordId, () =>
-          deleteRecord(recordId, personId)
-        );
+        confirmDelete("record", recordId, () => deleteRecord(recordId, personId));
       }
     };
 
     /* ---------- THIRD-PARTY ACTION HANDLERS ---------- */
     $("#personThirdTbody").onclick = (e) => {
-      if (!isAdminOrManager()) return;
-
-      const row = e.target.closest("tr[data-cert-id]");
-      if (!row) return;
-      const certId = row.dataset.certId;
-
       const btn = e.target.closest("[data-action]");
       if (!btn) return;
 
-      if (btn.dataset.action === "edit-third") openEditThirdModal(certId, personId);
+      const row = e.target.closest("tr[data-cert-id]");
+      if (!row) return;
 
+      if (btn.dataset.action === "view-evidence") {
+        openEvidenceViewer(btn.dataset.path);
+        return;
+      }
+
+      if (!isAdminOrManager()) return;
+
+      const certId = row.dataset.certId;
+      if (btn.dataset.action === "edit-third") openEditThirdModal(certId, personId);
       if (btn.dataset.action === "delete-third") {
-        confirmDelete("third", certId, () =>
-          deleteThird(certId, personId)
-        );
+        confirmDelete("third", certId, () => deleteThird(certId, personId));
       }
     };
 
@@ -538,7 +594,6 @@ if (!data.thirdparty.length) {
     showToast("Error","Failed to load profile","danger");
   }
 }
-
 /* ========================================================
    REPORTS (ADMIN/MANAGER ONLY)
 ======================================================== */
@@ -613,13 +668,19 @@ async function renderReports(){
   await load();
 
   // CSV export includes the Person column already
-  $("#btnExportCsv")?.addEventListener("click",()=>{
-    const rows=[["Staff Name","Email","Course","Completed","Expires","Assessor","Status"]];
-    $$("#reportTbody tr").forEach(tr =>
-      rows.push([...tr.children].map(td=>td.textContent.trim()))
-    );
-    downloadCsv(`report-${new Date().toISOString().slice(0,10)}.csv`,rows);
+  document.querySelector("#btnExportCsv")?.addEventListener("click", () => {
+  const rows = [
+    ["Staff Name","Email","Course","Completed","Expires","Assessor","Status"]
+  ];
+
+  document.querySelectorAll("#reportTbody tr").forEach(tr => {
+    const cols = [...tr.children].map(td => td.textContent.trim());
+    rows.push(cols);
   });
+
+  downloadCsv(`report-${new Date().toISOString().slice(0,10)}.csv`, rows);
+});
+
 }
 
 /* ========================================================
@@ -906,4 +967,27 @@ $("#editThirdForm")?.addEventListener("submit", async e=>{
 async function deleteThird(id,pid){
   await fetchJSON(`${API}/api/thirdparty/${id}`,{method:"DELETE"});
   openPersonProfile(pid);
+}
+
+function openEvidenceViewer(path) {
+  const modal = new bootstrap.Modal("#evidenceModal");
+  const body = document.querySelector("#evidenceBody");
+
+  if (!path) {
+    body.innerHTML = `<div class="text-danger">No evidence available</div>`;
+    return modal.show();
+  }
+
+  const url = `${API}${path}`;
+  const lower = url.toLowerCase();
+
+  if (lower.endsWith(".pdf")) {
+    body.innerHTML = `<iframe src="${url}" style="width:100%; height:78vh;" frameborder="0"></iframe>`;
+  } else if (/\.(jpg|jpeg|png|gif|webp)$/i.test(lower)) {
+    body.innerHTML = `<img src="${url}" class="img-fluid" />`;
+  } else {
+    body.innerHTML = `<a href="${url}" target="_blank" class="btn btn-primary">Download File</a>`;
+  }
+
+  modal.show();
 }
