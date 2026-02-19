@@ -413,57 +413,70 @@ async function openPersonProfile(personId) {
     } else {
       hide($("#personTrainingEmpty"));
       tB.innerHTML = data.training.map(r => `
-        <tr data-record-id="${r.training_record_id}">
-          <td>${esc(r.course)}</td>
-          <td>${fmt(r.completed)}</td>
-          <td>${fmt(r.expires)}</td>
-          <td>${esc(r.assessor || "")}</td>
-          <td>${statusBadge(r.status)}</td>
-          <td class="text-end">
-            ${isAdminOrManager() ? `
-              edit-record
-                <i class="bi bi-pencil"></i>
-              </button>
-              delete-record
-                <i class="bi bi-trash"></i>
-              </button>
-            ` : ""}
-          </td>
-        </tr>
-      `).join("");
+  <tr data-record-id="${r.training_record_id}">
+    <td>${esc(r.course)}</td>
+    <td>${fmt(r.completed)}</td>
+    <td>${fmt(r.expires)}</td>
+    <td>${esc(r.assessor || "")}</td>
+    <td>${statusBadge(r.status)}</td>
+    <td class="text-end">
+      ${isAdminOrManager() ? `
+        <button class="btn btn-sm btn-outline-primary me-1" data-action="edit-record">
+          <i class="bi bi-pencil"></i>
+        </button>
+        <button class="btn btn-sm btn-outline-danger" data-action="delete-record">
+          <i class="bi bi-trash"></i>
+        </button>
+      ` : ""}
+    </td>
+  </tr>
+`).join("");
     }
 
-    /* ---------- THIRD-PARTY LIST ---------- */
-    hide($("#personThirdSpinner"));
-    const t3 = $("#personThirdTbody");
 
-    if (!data.thirdparty.length) {
-      show($("#personThirdEmpty"));
-      t3.innerHTML = "";
-    } else {
-      hide($("#personThirdEmpty"));
-      t3.innerHTML = data.thirdparty.map(c => `
-        <tr data-cert-id="${c.cert_id}">
-          <td>${esc(c.title)}</td>
-          <td>${esc(c.provider)}</td>
-          <td>${fmt(c.completion_date)}</td>
-          <td>${fmt(c.expiry_date)}</td>
-          <td class="text-end">
-            ${isAdminOrManager() ? `
-              ${API}/api/thirdparty/${c.cert_id}/ics
-                <i class="bi bi-calendar-plus"></i>
-              </a>
-              edit-third
-                <i class="bi bi-pencil"></i>
-              </button>
-              delete-third
-                <i class="bi bi-trash"></i>
-              </button>
-            ` : ""}
-          </td>
-        </tr>
-      `).join("");
-    }
+hide($("#personThirdSpinner"));
+const t3 = $("#personThirdTbody");
+
+if (!data.thirdparty.length) {
+  show($("#personThirdEmpty"));
+  t3.innerHTML = "";
+} else {
+  hide($("#personThirdEmpty"));
+  t3.innerHTML = data.thirdparty.map(c => `
+    <tr data-cert-id="${c.cert_id}">
+      <td>${esc(c.title)}</td>
+      <td>${esc(c.provider)}</td>
+      <td>${fmt(c.completion_date)}</td>
+      <td>${fmt(c.expiry_date)}</td>
+      <td class="text-end">
+        ${isAdminOrManager() ? `
+          <a 
+            class="btn btn-sm btn-outline-secondary me-1" 
+            href="${API}/api/thirdparty/${c.cert_id}/ics" 
+            target="_blank" 
+            title="Add to calendar (ICS)">
+            <i class="bi bi-calendar-plus"></i>
+          </a>
+
+          <button 
+            class="btn btn-sm btn-outline-primary me-1" 
+            data-action="edit-third" 
+            title="Edit certificate">
+            <i class="bi bi-pencil"></i>
+          </button>
+
+          <button 
+            class="btn btn-sm btn-outline-danger" 
+            data-action="delete-third" 
+            title="Delete certificate">
+            <i class="bi bi-trash"></i>
+          </button>
+        ` : ""}
+      </td>
+    </tr>
+  `).join("");
+}
+
 
     /* ---------- TRAINING ACTION HANDLERS ---------- */
     $("#personTrainingTbody").onclick = (e) => {
@@ -554,6 +567,8 @@ async function renderReports(){
     }
   }
 
+
+  
   // Core loader with filters
   async function load(){
     try{

@@ -180,15 +180,6 @@ Users cannot modify or view another user’s training
 Admin‑only actions for sensitive operations
 File uploads validated and stored in controlled directories
 
-
-Deployment
-The system is known to work with:
-
-WeCloud
-Docker
-Standard Node.js hosting providers
-Local servers
-
 Ensure:
 
 /uploads directory is writable
