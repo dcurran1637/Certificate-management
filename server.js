@@ -1565,6 +1565,55 @@ app.get(
   }
 );
 
+// View a single course and its training records — any authenticated user
+app.get("/api/course/:id/details", requireAuth, async (req, res, next) => {
+  try {
+    const courseId = Number(req.params.id);
+
+    const [course] = await q(
+  `SELECT 
+      c.course_id,
+      c.name,
+      c.description,
+      c.type,
+      c.validity_days,
+      cat.name AS category,
+      prov.name AS provider
+   FROM courses c
+   LEFT JOIN categories cat ON cat.category_id = c.category_id
+   LEFT JOIN providers  prov ON prov.provider_id = c.provider_id
+   WHERE c.course_id=?`,
+  [courseId]
+);
+
+    if (!course) return res.status(404).json({ error: "Course not found" });
+
+    const records = await q(
+      `SELECT 
+          tr.training_record_id,
+          p.display_name AS person,
+          tr.completion_date AS completed,
+          tr.expiry_date AS expires,
+          CASE
+            WHEN tr.expiry_date IS NULL THEN 'current'
+            WHEN tr.expiry_date < CURDATE() THEN 'expired'
+            WHEN tr.expiry_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 90 DAY)
+              THEN 'expiring_soon'
+            ELSE 'current'
+          END AS status
+       FROM training_records tr
+       JOIN people p ON p.person_id = tr.person_id
+       WHERE tr.course_id=?
+       ORDER BY tr.completion_date DESC`,
+      [courseId]
+    );
+
+    res.json({ course, records });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ------------------------------------------------------
 // Global Error Handler
 // ------------------------------------------------------
@@ -1579,3 +1628,29 @@ app.use((err, _req, res, _next) => {
 app.listen(PORT, () => {
   console.log(`API + Frontend listening on http://127.0.0.1:${PORT}`);
 });
+
+app.put(
+  "/api/courses/:id",
+  requireAuth,
+  allowRoles("admin", "manager"),
+  async (req, res, next) => {
+    try {
+      const id = Number(req.params.id);
+      const { name, description, type, providerName, validityDays } = req.body;
+
+      await q(
+        `UPDATE courses
+         SET name=?, description=?, type=?, provider_id=(
+            SELECT provider_id FROM providers WHERE name=? LIMIT 1
+         ), validity_days=?
+         WHERE course_id=?`,
+        [name, description, type, providerName || null, validityDays || null, id]
+      );
+
+      res.json({ success: true });
+
+    } catch (err) {
+      next(err);
+    }
+  }
+);

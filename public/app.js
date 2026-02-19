@@ -239,12 +239,39 @@ async function renderDashboard() {
     console.warn("Stats load failed:", err);
   }
 
+  /* =====================================================
+     HIDE "ALL RECORDS" TAB FOR NORMAL USERS
+  ====================================================== */
+  const allRecordsTab = document.querySelector('#tabAllRecordsWrapper');
+  if (isUser()) {
+    allRecordsTab?.classList.add("d-none");
+  } else {
+    allRecordsTab?.classList.remove("d-none");
+  }
+
+  // Hide All Records tab + pane for normal users
+  if (isUser()) {
+    document.querySelector('#tabAllRecordsWrapper')?.classList.add("d-none");
+    document.querySelector('#records')?.classList.add("d-none");
+  } else {
+    document.querySelector('#tabAllRecordsWrapper')?.classList.remove("d-none");
+    document.querySelector('#records')?.classList.remove("d-none");
+  }
+
   /* ---------- UPCOMING EXPIRIES (Calendar Tab) ---------- */
   async function loadUpcoming() {
     const container = document.querySelector("#calendar .card-body");
 
     try {
-      const rows = await fetchJSON(`${API}/api/expiring`);
+      let rows = await fetchJSON(`${API}/api/expiring`);
+
+      /* ==============================================
+         USERS ONLY SEE THEIR OWN UPCOMING EXPIRATIONS
+      =============================================== */
+      if (isUser()) {
+        const acc = account();
+        rows = rows.filter(r => r.email === acc.email);
+      }
 
       if (!rows.length) {
         container.innerHTML = `
@@ -325,25 +352,36 @@ async function renderDashboard() {
   $("#recordSearch")?.addEventListener("input", (e) =>
     loadRecords(e.target.value)
   );
-  await loadRecords("");
+
+  /* =====================================================
+     ONLY LOAD RECORDS IF NOT USER
+     (users cannot access the tab anyway)
+  ====================================================== */
+  if (!isUser()) await loadRecords("");
 
 
   /* ---------- COURSES TAB ---------- */
   const ct = $("#courseTbody");
   const courses = await fetchJSON(`${API}/api/courses`).catch(() => []);
+
   ct.innerHTML = courses
     .map(
       (c) => `
-    <tr>
-      <td>${esc(c.name)}</td>
-      <td>${esc(c.type)}</td>
-      <td>${esc(c.category)}</td>
-      <td>${esc(c.provider)}</td>
-      <td>${c.validity_days || ""}</td>
-      <td class="text-end"></td>
-    </tr>`
+      <tr data-course-id="${c.course_id}" class="course-row" style="cursor:pointer;">
+        <td>${esc(c.name)}</td>
+        <td>${esc(c.type)}</td>
+        <td>${esc(c.category)}</td>
+        <td>${esc(c.provider)}</td>
+        <td>${c.validity_days || ""}</td>
+      </tr>`
     )
     .join("");
+
+  ct.onclick = (e) => {
+    const row = e.target.closest("tr[data-course-id]");
+    if (!row) return;
+    openCourseView(row.dataset.courseId);
+  };
 
   /* ---------- BUTTONS ---------- */
   if (!isAdminOrManager()) $("#btnNewCourse")?.classList.add("d-none");
@@ -355,7 +393,6 @@ async function renderDashboard() {
     openRecordModal();
   });
 }
-
 /* ========================================================
    PEOPLE (ADMIN/MANAGER ONLY)
 ======================================================== */
@@ -402,6 +439,134 @@ async function renderPeople(){
     empty.classList.remove("d-none");
   }
 }
+
+let courseViewModal;
+
+async function openCourseView(id) {
+  courseViewModal = courseViewModal || new bootstrap.Modal("#courseViewModal");
+
+  // Reset UI while loading
+  $("#cvTitle").textContent = "Loading…";
+  $("#cvType").textContent = "";
+  $("#cvDescription").textContent = "";
+  $("#cvCategory").textContent = "—";
+  $("#cvProvider").textContent = "—";
+  $("#cvValid").textContent = "";
+  $("#cvTbody").innerHTML = `
+    <tr><td colspan="4" class="text-secondary">Loading…</td></tr>
+  `;
+
+  try {
+    const data = await fetchJSON(`${API}/api/course/${id}/details`);
+    const c = data.course;
+
+    // Fill course info
+    $("#cvTitle").textContent = c.name;
+    $("#cvType").textContent = c.type || "";
+    $("#cvDescription").textContent = c.description || "No description provided.";
+    $("#cvCategory").textContent = c.category || "—";
+    $("#cvProvider").textContent = c.provider || "—";
+    $("#cvValid").textContent = c.validity_days ?? "No expiry";
+
+    /* ------------------------------------------------------
+       SHOW OR HIDE TRAINING RECORDS (RBAC ENFORCED)
+       ------------------------------------------------------ */
+    if (!isAdminOrManager()) {
+      $("#cvTbody").innerHTML = `
+        <tr>
+          <td colspan="4" class="text-center text-secondary">
+            Training records are only visible to managers and admins
+          </td>
+        </tr>
+      `;
+    } else {
+      $("#cvTbody").innerHTML =
+        data.records.length
+          ? data.records
+              .map(
+                (r) => `
+                <tr>
+                  <td>${esc(r.person)}</td>
+                  <td>${fmt(r.completed)}</td>
+                  <td>${fmt(r.expires)}</td>
+                  <td>${statusBadge(r.status)}</td>
+                </tr>`
+              )
+              .join("")
+          : `<tr><td colspan="4" class="text-center text-secondary">No training records</td></tr>`;
+    }
+
+    /* ------------------------------------------------------
+       EDIT COURSE BUTTON (ADMIN/MANAGER ONLY)
+       ------------------------------------------------------ */
+    const btnEdit = document.getElementById("btnEditCourse");
+    if (isAdminOrManager()) {
+      btnEdit.classList.remove("d-none");
+      btnEdit.onclick = () => openEditCourseModal(id);
+    } else {
+      btnEdit.classList.add("d-none");
+    }
+
+    /* ------------------------------------------------------ */
+    courseViewModal.show();
+    /* ------------------------------------------------------ */
+
+  } catch (err) {
+    console.error(err);
+    showToast("Error", "Failed to load course", "danger");
+  }
+}
+
+
+let editCourseModal;
+
+async function openEditCourseModal(id) {
+  editCourseModal = editCourseModal || new bootstrap.Modal("#editCourseModal");
+
+  const data = await fetchJSON(`${API}/api/course/${id}/details`);
+  const c = data.course;
+
+  $("#editCourseId").value = id;
+  $("#editCourseName").value = c.name;
+  $("#editCourseDesc").value = c.description || "";
+  $("#editCourseType").value = c.type || "";
+  $("#editCourseProvider").value = c.provider || "";
+  $("#editCourseValid").value = c.validity_days ?? "";
+
+  editCourseModal.show();
+}
+
+document.getElementById("editCourseForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+
+  const id = $("#editCourseId").value;
+
+  const payload = {
+    name: $("#editCourseName").value.trim(),
+    description: $("#editCourseDesc").value.trim(),
+    type: $("#editCourseType").value.trim(),
+    providerName: $("#editCourseProvider").value.trim(),
+    validityDays: $("#editCourseValid").value || null,
+  };
+
+  try {
+    await fetchJSON(`${API}/api/courses/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    editCourseModal.hide();
+    showToast("Saved", "Course updated", "success");
+
+    // Refresh course view
+    openCourseView(id);
+
+  } catch (err) {
+    console.error(err);
+    showToast("Error", "Failed to update course", "danger");
+  }
+});
 
 /* ========================================================
    PROFILE MODAL (STRICT RBAC)

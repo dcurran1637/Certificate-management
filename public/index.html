@@ -137,8 +137,11 @@
       <li class="nav-item" role="presentation">
         <button class="nav-link active" id="calendar-tab" data-bs-toggle="tab" data-bs-target="#calendar" type="button" role="tab" aria-controls="calendar" aria-selected="true">Calendar</button>
       </li>
-      <li class="nav-item" role="presentation">
-        <button class="nav-link" id="records-tab" data-bs-toggle="tab" data-bs-target="#records" type="button" role="tab" aria-controls="records" aria-selected="false">All Records</button>
+      <li class="nav-item" id="tabAllRecordsWrapper" role="presentation">
+        <button class="nav-link" id="records-tab" data-bs-toggle="tab"
+                data-bs-target="#records" type="button">
+            All Records
+        </button>
       </li>
       <li class="nav-item" role="presentation">
         <button class="nav-link" id="courses-tab" data-bs-toggle="tab" data-bs-target="#courses" type="button" role="tab" aria-controls="courses" aria-selected="false">Courses</button>
@@ -179,7 +182,6 @@
                   <th scope="col">Expires</th>
                   <th scope="col">Assessor</th>
                   <th scope="col">Status</th>
-                  <th scope="col" class="text-end">Actions</th>
                 </thead>
                 <tbody id="recordsTbody"></tbody>
               </table>
@@ -201,7 +203,6 @@
                     <th>Category</th>
                     <th>Provider</th>
                     <th>Valid (days)</th>
-                    <th class="text-end">Actions</th>
                   </tr>
                 </thead>
                 <tbody id="courseTbody"></tbody>
@@ -820,6 +821,7 @@
     });
   </script>
 
+<!-- ===== Evidence Modal (for viewing uploaded files) ===== -->
   <div class="modal fade" id="evidenceModal" tabindex="-1">
   <div class="modal-dialog modal-xl modal-dialog-centered">
     <div class="modal-content">
@@ -831,5 +833,103 @@
     </div>
   </div>
 </div>
+
+<!-- ===== Course View Modal (shows course details + training records) ===== -->
+<div class="modal fade" id="courseViewModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <div>
+          <h5 class="modal-title" id="cvTitle">Course</h5>
+          <div class="small text-secondary" id="cvType"></div>
+          <p class="mt-2" id="cvDescription"></p>
+        </div>
+        <button class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+
+      <div class="modal-body">
+        <div class="row g-2 mb-3">
+          <div class="col-md-4"><strong>Category:</strong> <span id="cvCategory"></span></div>
+          <div class="col-md-4"><strong>Provider:</strong> <span id="cvProvider"></span></div>
+          <div class="col-md-4"><strong>Validity (days):</strong> <span id="cvValid"></span></div>
+        </div>
+
+        <hr class="my-3">
+
+        <h6 class="mb-2">Training Records</h6>
+        <div class="table-responsive">
+          <table class="table table-sm align-middle">
+            <thead>
+              <tr>
+                <th>Person</th>
+                <th>Completed</th>
+                <th>Expires</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="cvTbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+      <button id="btnEditCourse" class="btn btn-primary d-none">
+        <i class="bi bi-pencil"></i> Edit Course
+      </button>
+      <button class="btn btn-light" data-bs-dismiss="modal">Close</button>
+    </div>
+    </div>
+  </div>
+</div>
+
+<!-- EDIT COURSE MODAL -->
+<div class="modal fade" id="editCourseModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-centered">
+    <div class="modal-content">
+      <form id="editCourseForm">
+        <div class="modal-header">
+          <h5 class="modal-title">Edit Course</h5>
+          <button class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+
+        <div class="modal-body">
+          <input type="hidden" id="editCourseId">
+
+          <div class="mb-3">
+            <label class="form-label">Course Name</label>
+            <input id="editCourseName" class="form-control" required>
+          </div>
+
+          <div class="mb-3">
+            <label class="form-label">Description</label>
+            <textarea id="editCourseDesc" class="form-control" rows="3"></textarea>
+          </div>
+
+          <div class="row g-3">
+            <div class="col-md-6">
+              <label class="form-label">Type</label>
+              <input id="editCourseType" class="form-control">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Provider</label>
+              <input id="editCourseProvider" class="form-control">
+            </div>
+          </div>
+
+          <div class="mt-3">
+            <label class="form-label">Validity (days)</label>
+            <input type="number" id="editCourseValid" class="form-control">
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button class="btn btn-light" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-primary" type="submit">Save Changes</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>
