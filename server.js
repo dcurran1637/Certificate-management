@@ -6,24 +6,59 @@
 require("dotenv").config();
 const path = require("path");
 const fs = require("fs");
+const crypto = require("crypto");
 const express = require("express");
 const session = require("express-session");
 const mysql = require("mysql2/promise");
 const multer = require("multer");
 const bcrypt = require("bcrypt");
+const rateLimit = require("express-rate-limit");
+const fileTypeFromBuffer = import("file-type").then(({ fileTypeFromBuffer }) => fileTypeFromBuffer);
 
 const {
   PORT = 5000,
   DB_HOST,
   DB_PORT,
   DB_USER,
-  DB_PASS,
+  DB_PASSWORD,
   DB_NAME,
   SESSION_SECRET,
   UPLOAD_DIR = "uploads",
+  APP_ORIGIN = "http://127.0.0.1:5000",
 } = process.env;
 
+const isProduction = process.env.NODE_ENV === "production";
+if (isProduction && !SESSION_SECRET) {
+  throw new Error("SESSION_SECRET is required in production");
+}
+if (isProduction && !APP_ORIGIN.startsWith("https://")) {
+  throw new Error("APP_ORIGIN must use HTTPS in production");
+}
+
 const app = express();
+if (isProduction) app.set("trust proxy", 1);
+if (isProduction) {
+  app.use((req, res, next) => {
+    if (!req.secure) return res.status(400).json({ error: "HTTPS is required" });
+    res.set("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+    next();
+  });
+}
+
+function requireSameOrigin(req, res, next) {
+  if (!["POST", "PUT", "PATCH", "DELETE"].includes(req.method)) return next();
+  const source = req.get("origin") || req.get("referer");
+  if (!source) return res.status(403).json({ error: "Request origin required" });
+  try {
+    if (new URL(source).origin !== APP_ORIGIN) {
+      return res.status(403).json({ error: "Cross-site request blocked" });
+    }
+  } catch (_err) {
+    return res.status(403).json({ error: "Invalid request origin" });
+  }
+  next();
+}
+app.use(requireSameOrigin);
 
 // ------------------------------------------------------
 // Core middleware
@@ -39,7 +74,7 @@ app.use(
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
-      secure: false,
+      secure: isProduction,
       sameSite: "lax"
     }
   })
@@ -62,7 +97,6 @@ if (fs.existsSync(PUBLIC_DIR)) {
 }
 
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-app.use("/uploads", express.static(path.resolve(UPLOAD_DIR)));
 
 // ------------------------------------------------------
 // MySQL
@@ -71,7 +105,7 @@ const pool = mysql.createPool({
   host: DB_HOST,
   port: +DB_PORT,
   user: DB_USER,
-  password: DB_PASS,
+  password: DB_PASSWORD,
   database: DB_NAME,
   connectionLimit: 10,
   timezone: "Z",
@@ -108,14 +142,42 @@ function allowSelfOrRoles(resolveTargetPID, ...roles) {
     if (!me) return res.status(401).json({ error: "Not authenticated" });
 
     const pid = await resolveTargetPID(req);
-    if (!pid) return res.status(400).json({ error: "Missing/invalid person_id" });
+    if (!pid) {
+      if (req.file?.path) fs.unlink(req.file.path, () => {});
+      return res.status(400).json({ error: "Missing/invalid person_id" });
+    }
 
     if (me.person_id === Number(pid)) return next();
     if (roles.includes(me.role)) return next();
 
+    if (req.file?.path) fs.unlink(req.file.path, () => {});
     return res.status(403).json({ error: "Forbidden" });
   };
 }
+
+const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: "draft-7", legacyHeaders: false });
+const registerLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 5, standardHeaders: "draft-7", legacyHeaders: false });
+const inviteLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 20, standardHeaders: "draft-7", legacyHeaders: false });
+
+app.post("/api/auth/invites", inviteLimiter, requireAuth, allowRoles("admin"), async (req, res, next) => {
+  const email = String(req.body.email || "").trim().toLowerCase();
+  const personId = Number(req.body.person_id);
+  if (!email || !personId) return res.status(400).json({ error: "Email and person_id required" });
+
+  try {
+    const [people] = await pool.query(`SELECT person_id FROM people WHERE person_id=? AND email=? LIMIT 1`, [personId, email]);
+    if (!people.length) return res.status(400).json({ error: "Person identity does not match email" });
+    const token = crypto.randomBytes(32).toString("hex");
+    await q(
+      `INSERT INTO registration_invites (person_id, email, token_hash, expires_at)
+       VALUES (?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL 24 HOUR))`,
+      [personId, email, crypto.createHash("sha256").update(token).digest("hex")]
+    );
+    res.status(201).json({ success: true, invite_token: token });
+  } catch (err) {
+    next(err);
+  }
+});
 
 function likeWrap(s) {
   return `%${String(s).replace(/[%_]/g, (m) => "\\" + m)}%`;
@@ -124,10 +186,10 @@ function likeWrap(s) {
 // ------------------------------------------------------
 // Auth Register
 // ------------------------------------------------------
-app.post("/api/auth/register", async (req, res) => {
-  const { email, password, username } = req.body;
-  if (!email || !password)
-    return res.status(400).json({ error: "Email & password required" });
+app.post("/api/auth/register", registerLimiter, async (req, res) => {
+  const { email, password, username, invite_token: inviteToken } = req.body;
+  if (!email || !password || !inviteToken)
+    return res.status(400).json({ error: "Email, password, and invite token required" });
 
   const hash = await bcrypt.hash(password, 10);
 
@@ -135,29 +197,33 @@ app.post("/api/auth/register", async (req, res) => {
   try {
     await conn.beginTransaction();
 
+    const [invites] = await conn.query(
+      `SELECT invite_id, person_id, email
+       FROM registration_invites
+       WHERE token_hash=? AND used_at IS NULL AND expires_at > UTC_TIMESTAMP()
+       LIMIT 1 FOR UPDATE`,
+      [crypto.createHash("sha256").update(inviteToken).digest("hex")]
+    );
+    const invite = invites[0];
+    if (!invite || invite.email.toLowerCase() !== email.trim().toLowerCase()) {
+      await conn.rollback();
+      return res.status(400).json({ error: "Invalid or expired invitation" });
+    }
+
     const [u] = await conn.query(
       `INSERT INTO users (email, username, password_hash, role)
        VALUES (?, ?, ?, 'user')`,
-      [email, username || null, hash]
+      [email.trim().toLowerCase(), username || null, hash]
     );
 
     const userId = u.insertId;
-
-    const [p] = await conn.query(
-      `INSERT INTO people (display_name, email, is_active)
-       VALUES (?, ?, 1)`,
-      [username || email, email]
-    );
-    const personId = p.insertId;
-
-    await conn.query(`UPDATE users SET person_id=? WHERE user_id=?`, [
-      personId,
-      userId,
-    ]);
+    const personId = invite.person_id;
+    await conn.query(`UPDATE users SET person_id=? WHERE user_id=?`, [personId, userId]);
+    await conn.query(`UPDATE registration_invites SET used_at=UTC_TIMESTAMP() WHERE invite_id=?`, [invite.invite_id]);
 
     await conn.commit();
 
-    res.json({ success: true, user_id: userId, person_id: personId });
+    res.json({ success: true });
   } catch (err) {
     await conn.rollback();
     if (err.code === "ER_DUP_ENTRY")
@@ -171,7 +237,7 @@ app.post("/api/auth/register", async (req, res) => {
 // ------------------------------------------------------
 // Auth Login
 // ------------------------------------------------------
-app.post("/api/auth/login", async (req, res) => {
+app.post("/api/auth/login", loginLimiter, async (req, res) => {
   const { email, password } = req.body;
 
   if (!email || !password)
@@ -191,35 +257,23 @@ app.post("/api/auth/login", async (req, res) => {
     return res.status(401).json({ error: "Invalid email or password" });
 
   const conn = await pool.getConnection();
+  let committed = false;
 
   try {
     await conn.beginTransaction();
 
-    const [pr] = await conn.query(
-      `SELECT person_id FROM people WHERE email=? LIMIT 1`,
-      [email]
-    );
-
-    let personId = pr[0]?.person_id;
-
+    const personId = user.person_id;
     if (!personId) {
-      const displayName = user.username || email;
-      const [ins] = await conn.query(
-        `INSERT INTO people (display_name, email, is_active)
-         VALUES (?, ?, 1)`,
-        [displayName, email]
-      );
-      personId = ins.insertId;
-    }
-
-    if (!user.person_id) {
-      await conn.query(`UPDATE users SET person_id=? WHERE user_id=?`, [
-        personId,
-        user.user_id,
-      ]);
+      await conn.rollback();
+      return res.status(403).json({ error: "Account is not linked to an employee identity" });
     }
 
     await conn.commit();
+    committed = true;
+
+    await new Promise((resolve, reject) => {
+      req.session.regenerate((err) => (err ? reject(err) : resolve()));
+    });
 
     req.session.user = {
       user_id: user.user_id,
@@ -231,7 +285,7 @@ app.post("/api/auth/login", async (req, res) => {
 
     res.json({ success: true, user: req.session.user });
   } catch (err) {
-    await conn.rollback();
+    if (!committed) await conn.rollback();
     res.status(500).json({ error: "Login sync failed" });
   } finally {
     conn.release();
@@ -624,15 +678,63 @@ app.get("/api/records", requireAuth, async (req, res, next) => {
 // ------------------------------------------------------
 // CREATE TRAINING RECORD
 // ------------------------------------------------------
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
-  filename: (_req, file, cb) => {
-    const ts = Date.now();
-    const safe = file.originalname.replace(/[^\w.\-]+/g, "_");
-    cb(null, `${ts}_${safe}`);
+const allowedMimeTypes = new Set([
+  "application/pdf",
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+]);
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (!allowedMimeTypes.has(file.mimetype)) {
+      return cb(new multer.MulterError("LIMIT_UNEXPECTED_FILE", "file"));
+    }
+    cb(null, true);
   },
 });
-const upload = multer({ storage });
+
+async function persistUpload(file) {
+  if (!file) return null;
+  const detectFileType = await fileTypeFromBuffer;
+  const detected = await detectFileType(file.buffer);
+  if (!detected || !allowedMimeTypes.has(detected.mime)) {
+    throw new multer.MulterError("LIMIT_UNEXPECTED_FILE", "file");
+  }
+  const filename = `${crypto.randomUUID()}.${detected.ext}`;
+  const fullPath = path.resolve(UPLOAD_DIR, filename);
+  await fs.promises.writeFile(fullPath, file.buffer, { flag: "wx", mode: 0o600 });
+  return { filename, path: fullPath, mimetype: detected.mime };
+}
+
+app.get("/api/files/:filename", requireAuth, async (req, res, next) => {
+  const filename = path.basename(req.params.filename);
+  try {
+    const [rows] = await pool.query(
+      `SELECT a.file_name, a.file_path, a.mime_type, tr.person_id
+       FROM attachments a JOIN training_records tr ON tr.training_record_id=a.training_record_id
+       WHERE a.file_path=?
+       UNION ALL
+       SELECT t.title AS file_name, t.file_path, t.mime_type, t.person_id
+       FROM third_party_certifications t WHERE t.file_path=? LIMIT 1`,
+      [filename, filename]
+    );
+    const file = rows[0];
+    const me = req.session.user;
+    if (!file) return res.status(404).json({ error: "File not found" });
+    if (me.person_id !== Number(file.person_id) && !["admin", "manager"].includes(me.role)) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    const fullPath = path.resolve(UPLOAD_DIR, filename);
+    if (!fullPath.startsWith(`${path.resolve(UPLOAD_DIR)}${path.sep}`)) return res.status(404).json({ error: "File not found" });
+    res.type(file.mime_type || "application/octet-stream");
+    res.download(fullPath, file.file_name || filename);
+  } catch (err) {
+    next(err);
+  }
+});
 
 app.post(
   "/api/records",
@@ -648,9 +750,16 @@ app.post(
   async (req, res, next) => {
     const { name, email, course_id, completion_date, notes, assessor } = req.body;
     const file = req.file;
+    let savedFile;
 
     if (!name || !email || !course_id || !completion_date)
       return res.status(400).json({ error: "Missing required fields" });
+
+    try {
+      savedFile = await persistUpload(file);
+    } catch (err) {
+      return next(err);
+    }
 
     const conn = await pool.getConnection();
 
@@ -685,12 +794,12 @@ app.post(
       );
 
       if (file) {
-        const rel = `/uploads/${file.filename}`;
+        const rel = savedFile.filename;
         await conn.query(
           `INSERT INTO attachments 
              (training_record_id, file_name, file_path, mime_type)
            VALUES (?, ?, ?, ?)`,
-          [ins.insertId, file.originalname, rel, file.mimetype]
+          [ins.insertId, file.originalname, rel, savedFile.mimetype]
         );
       }
 
@@ -698,7 +807,7 @@ app.post(
       res.json({ success: true });
     } catch (err) {
       await conn.rollback();
-      if (file && fs.existsSync(file.path)) fs.unlinkSync(file.path);
+      if (savedFile) fs.unlink(savedFile.path, () => {});
       next(err);
     } finally {
       conn.release();
@@ -718,10 +827,12 @@ app.put(
     const id = Number(req.params.id);
     const { course_id, completion_date, notes, assessor } = req.body;
     const file = req.file;
+    let savedFile;
 
     const conn = await pool.getConnection();
 
     try {
+      savedFile = await persistUpload(file);
       await conn.beginTransaction();
 
       await conn.query(
@@ -738,12 +849,12 @@ app.put(
       );
 
       if (file) {
-        const rel = `/uploads/${file.filename}`;
+        const rel = savedFile.filename;
         await conn.query(
           `INSERT INTO attachments 
              (training_record_id, file_name, file_path, mime_type)
            VALUES (?, ?, ?, ?)`,
-          [id, file.originalname, rel, file.mimetype]
+          [id, file.originalname, rel, savedFile.mimetype]
         );
       }
 
@@ -751,6 +862,7 @@ app.put(
       res.json({ success: true });
     } catch (err) {
       await conn.rollback();
+      if (savedFile) fs.unlink(savedFile.path, () => {});
       next(err);
     } finally {
       conn.release();
@@ -976,6 +1088,7 @@ app.post(
   async (req, res, next) => {
     const { person_id, title, provider, completion_date, expiry_date, notes } = req.body;
     const file = req.file;
+    let savedFile;
 
     if (!person_id || !title || !provider || !completion_date)
       return res.status(400).json({ error: "Missing required fields" });
@@ -984,8 +1097,13 @@ app.post(
     let mimeType = null;
 
     if (file) {
-      filePath = `/uploads/${file.filename}`;
-      mimeType = file.mimetype;
+      try {
+        savedFile = await persistUpload(file);
+      } catch (err) {
+        return next(err);
+      }
+      filePath = savedFile.filename;
+      mimeType = savedFile.mimetype;
     }
 
     try {
@@ -1007,6 +1125,7 @@ app.post(
 
       res.json({ success: true });
     } catch (err) {
+      if (savedFile) fs.unlink(savedFile.path, () => {});
       next(err);
     }
   }
@@ -1022,9 +1141,11 @@ app.put(
     const certId = Number(req.params.id);
     const { title, provider, completion_date, expiry_date, notes } = req.body;
     const file = req.file;
+    let savedFile;
 
     const conn = await pool.getConnection();
     try {
+      savedFile = await persistUpload(file);
       await conn.beginTransaction();
 
       await conn.query(
@@ -1035,12 +1156,12 @@ app.put(
       );
 
       if (file) {
-        const filePath = `/uploads/${file.filename}`;
+        const filePath = savedFile.filename;
         await conn.query(
           `UPDATE third_party_certifications
            SET file_path=?, mime_type=?
            WHERE cert_id=?`,
-          [filePath, file.mimetype, certId]
+          [filePath, savedFile.mimetype, certId]
         );
       }
 
@@ -1049,6 +1170,7 @@ app.put(
 
     } catch (err) {
       await conn.rollback();
+      if (savedFile) fs.unlink(savedFile.path, () => {});
       next(err);
     } finally {
       conn.release();
@@ -1619,7 +1741,10 @@ app.get("/api/course/:id/details", requireAuth, async (req, res, next) => {
 // ------------------------------------------------------
 app.use((err, _req, res, _next) => {
   console.error("SERVER ERROR:", err);
-  res.status(500).json({ error: "Server error", detail: err.message });
+  if (err instanceof multer.MulterError) {
+    return res.status(400).json({ error: "Invalid or oversized upload" });
+  }
+  res.status(500).json({ error: "Server error" });
 });
 
 // ------------------------------------------------------

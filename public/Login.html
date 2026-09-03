@@ -37,6 +37,7 @@
             <input id="regName" type="text" placeholder="Full name" required/>
             <input id="regEmail" type="email" placeholder="Email" required />
             <input id="regPassword" type="password" placeholder="Password" required />
+            <input id="regInviteToken" type="text" placeholder="Invitation token" required />
             <div class="d-flex gap-2">
               <button type="submit" class="btn-primary">Register</button>
               <button type="button" id="btnSwitchToLogin" class="btn-light">Back to login</button>
@@ -52,7 +53,7 @@
       Login & Register
 ========================== */
 
-const API = "http://127.0.0.1:5000";
+const API = "";
 
 /* ——— Modal Controls ——— */
 const loginForm = document.getElementById('loginForm');
@@ -127,41 +128,21 @@ registerForm.addEventListener('submit', async (e) => {
   const username = document.getElementById('regName').value.trim();
   const email = document.getElementById('regEmail').value.trim();
   const password = document.getElementById('regPassword').value.trim();
+  const invite_token = document.getElementById('regInviteToken').value.trim();
 
   try {
     const resp = await fetch(`${API}/api/auth/register`, {
       method: 'POST',
       credentials: 'include',  
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password, username })
+      body: JSON.stringify({ email, password, username, invite_token })
     });
 
     const data = await resp.json();
     if (!resp.ok) return alert(data.error || "Registration failed");
 
-    // Auto-login 
-    const loginResp = await fetch(`${API}/api/auth/login`, {
-      method: 'POST',
-      credentials: 'include',  
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password })
-    });
-
-    const loginData = await loginResp.json();
-    if (!loginResp.ok) return alert(loginData.error || "Auto-login failed");
-
-    sessionStorage.setItem("account", JSON.stringify({
-      email: loginData.user.email,
-      username: loginData.user.username,
-      user_id: loginData.user.user_id,
-      person_id: loginData.user.person_id,
-      role: loginData.user.role || "user"
-    }));
-
-    sessionStorage.setItem("profile", JSON.stringify(loginData.user));
-
     registerModal.classList.remove('open');
-    window.location.replace('index.html#/dashboard');
+    alert("Registration complete. Sign in to continue.");
 
   } catch (err) {
     console.error(err);

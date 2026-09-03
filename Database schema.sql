@@ -103,6 +103,17 @@ CREATE TABLE IF NOT EXISTS attachments (
   FOREIGN KEY (training_record_id) REFERENCES training_records(training_record_id)
 );
 
+-- Registration is invite-only. Store only a SHA-256 token digest.
+CREATE TABLE IF NOT EXISTS registration_invites (
+  invite_id INT AUTO_INCREMENT PRIMARY KEY,
+  person_id INT NOT NULL,
+  email VARCHAR(255) NOT NULL,
+  token_hash CHAR(64) NOT NULL UNIQUE,
+  expires_at DATETIME NOT NULL,
+  used_at DATETIME NULL,
+  FOREIGN KEY (person_id) REFERENCES people(person_id)
+);
+
 -- =============================================
 -- THIRD-PARTY CERTIFICATIONS
 -- =============================================
@@ -125,8 +136,11 @@ CREATE TABLE IF NOT EXISTS third_party_certifications (
 INSERT IGNORE INTO categories (name) VALUES ('Other'), ('Safety'), ('First Aid'), ('Compliance'), ('Technical');
 
 -- =============================================
--- MYSQL USER (optional but recommended)
+-- MYSQL APPLICATION USER
 -- =============================================
-CREATE USER IF NOT EXISTS 'certadmin'@'localhost' IDENTIFIED BY 'password123';
-GRANT ALL PRIVILEGES ON certapp.* TO 'certadmin'@'localhost';
+-- Generate a password in your secret manager, then substitute it for <ROTATED_SECRET>
+-- in the following command. Never commit the resulting command or secret.
+CREATE USER IF NOT EXISTS 'certapp_app'@'localhost';
+ALTER USER 'certapp_app'@'localhost' IDENTIFIED BY '<ROTATED_SECRET>';
+GRANT SELECT, INSERT, UPDATE, DELETE ON certapp.* TO 'certapp_app'@'localhost';
 FLUSH PRIVILEGES;

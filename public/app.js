@@ -1,4 +1,4 @@
-const API = "http://127.0.0.1:5000";
+const API = "";
 
 /* ----------------------- Utilities ----------------------- */
 const $ = (s, r=document)=>r.querySelector(s);
@@ -1143,7 +1143,7 @@ function openEvidenceViewer(path) {
     return modal.show();
   }
 
-  const url = `${API}${path}`;
+  const url = path.startsWith("/api/files/") ? `${API}${path}` : `${API}/api/files/${encodeURIComponent(path.split("/").pop())}`;
   const lower = url.toLowerCase();
 
   if (lower.endsWith(".pdf")) {
