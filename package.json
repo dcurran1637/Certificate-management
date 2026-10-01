@@ -5,21 +5,26 @@
   "main": "app.js",
   "scripts": {
     "start": "node server.js",
-    "init-db": "node init_db.js"
+    "init-db": "node init_db.js",
+    "test": "node --test"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",
     "cors": "^2.8.6",
     "dotenv": "^16.6.1",
     "express": "^4.22.1",
+    "express-mysql-session": "^3.0.3",
     "express-rate-limit": "^8.7.0",
     "express-session": "^1.19.0",
     "file-type": "^22.0.2",
     "jsonwebtoken": "^9.0.0",
     "multer": "^2.3.0",
-    "mysql2": "^3.24.3"
+    "mysql2": "^3.24.5"
   },
   "overrides": {
-    "qs": "^6.16.0"
+    "qs": "^6.16.0",
+    "express-mysql-session": {
+      "mysql2": "$mysql2"
+    }
   }
 }
