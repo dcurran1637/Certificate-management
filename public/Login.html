@@ -109,12 +109,9 @@ loginForm.addEventListener('submit', async (e) => {
       role: data.user.role || "user"
     }));
 
-    sessionStorage.setItem("profile", JSON.stringify(data.user));
-
     window.location.replace("index.html#/dashboard");
 
-  } catch (err) {
-    console.error(err);
+  } catch {
     alert("Login error");
   }
 });
@@ -144,8 +141,7 @@ registerForm.addEventListener('submit', async (e) => {
     registerModal.classList.remove('open');
     alert("Registration complete. Sign in to continue.");
 
-  } catch (err) {
-    console.error(err);
+  } catch {
     alert("Registration error");
   }
 });

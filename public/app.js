@@ -25,8 +25,7 @@ async function populateCourseSelect(selector) {
     sel.innerHTML = courses
       .map(c => `<option value="${c.course_id}">${esc(c.name)}</option>`)
       .join("");
-  } catch (err) {
-    console.error("Populate courses failed:", err);
+  } catch {
     sel.innerHTML = `<option value="">Failed to load courses</option>`;
   }
 }
@@ -48,7 +47,7 @@ function statusBadge(status) {
 
 function downloadCsv(filename, rows) {
   const csv = rows.map(row =>
-    row.map(value => `"${String(value).replace(/"/g, '""')}"`).join(",")
+    row.map(value => exportUtils.csvCell(value)).join(",")
   ).join("\n");
 
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
@@ -216,8 +215,7 @@ document.addEventListener("click", async (e) => {
       // Reload profile so the UI reflects changes
       openPersonProfile(personId);
 
-    } catch (err) {
-      console.error(err);
+    } catch {
       showToast("Error", "Failed to save role", "danger");
     }
   }
@@ -235,8 +233,7 @@ async function renderDashboard() {
     $("#statCourses").textContent = s.activeCourses;
     $("#statExpiring").textContent = s.expiringSoon;
     $("#statCerts").textContent = s.currentCerts;
-  } catch (err) {
-    console.warn("Stats load failed:", err);
+  } catch {
   }
 
   /* =====================================================
@@ -307,8 +304,7 @@ async function renderDashboard() {
             .join("")}
         </ul>
       `;
-    } catch (err) {
-      console.error("Failed to load upcoming expiries:", err);
+    } catch {
       container.innerHTML = `
         <div class="text-secondary small">Failed to load upcoming expiries.</div>
       `;
@@ -343,8 +339,7 @@ async function renderDashboard() {
           )
           .join("") ||
         `<tr><td colspan="7" class="text-center">No records</td></tr>`;
-    } catch (err) {
-      console.error(err);
+    } catch {
       tB.innerHTML = `<tr><td colspan="7" class="text-center">Failed</td></tr>`;
     }
   }
@@ -511,8 +506,7 @@ async function openCourseView(id) {
     courseViewModal.show();
     /* ------------------------------------------------------ */
 
-  } catch (err) {
-    console.error(err);
+  } catch {
     showToast("Error", "Failed to load course", "danger");
   }
 }
@@ -562,8 +556,7 @@ document.getElementById("editCourseForm").addEventListener("submit", async (e) =
     // Refresh course view
     openCourseView(id);
 
-  } catch (err) {
-    console.error(err);
+  } catch {
     showToast("Error", "Failed to update course", "danger");
   }
 });
@@ -754,8 +747,7 @@ async function openPersonProfile(personId) {
 
     personModal.show();
 
-  } catch (err) {
-    console.error(err);
+  } catch {
     showToast("Error","Failed to load profile","danger");
   }
 }
@@ -780,10 +772,9 @@ async function renderReports(){
         people.map(p => `<option value="${p.person_id}">${esc(p.name)} (${esc(p.email)})</option>`)
       );
       selectPerson.innerHTML = opts.join("");
-    } catch (err) {
+    } catch {
       // If it fails, keep an "All" only
       selectPerson.innerHTML = '<option value="">All people</option>';
-      console.warn("Failed to load people for report filter:", err);
     }
   }
 
@@ -816,8 +807,7 @@ async function renderReports(){
           <td>${esc(r.assessor || "")}</td>
           <td>${statusBadge(r.status)}</td>
         </tr>`).join("");
-    }catch(err){
-      console.error("Reports load failed:", err);
+    }catch{
       tbody.innerHTML="";
       empty.classList.remove("d-none");
       count.textContent="0";
@@ -1090,8 +1080,7 @@ async function openEditThirdModal(certId, pid){
 
     editThirdModal.show();
 
-  } catch(err) {
-    console.error(err);
+  } catch {
     showToast("Error","Cannot open certificate","danger");
   }
 }
@@ -1123,8 +1112,7 @@ $("#editThirdForm")?.addEventListener("submit", async e=>{
     // Refresh the profile section
     openPersonProfile(pid);
 
-  } catch(err) {
-    console.error(err);
+  } catch {
     showToast("Error","Failed to save certificate","danger");
   }
 });
