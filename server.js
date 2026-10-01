@@ -10,10 +10,13 @@ const crypto = require("crypto");
 const express = require("express");
 const session = require("express-session");
 const mysql = require("mysql2/promise");
+const MySQLStore = require("express-mysql-session")(session);
 const multer = require("multer");
 const bcrypt = require("bcrypt");
 const rateLimit = require("express-rate-limit");
 const fileTypeFromBuffer = import("file-type").then(({ fileTypeFromBuffer }) => fileTypeFromBuffer);
+const { personScope, refreshSessionUser, createConcurrencyLimit } = require("./security");
+const { escapeIcsText } = require("./public/export-utils");
 
 const {
   PORT = 5000,
@@ -22,6 +25,7 @@ const {
   DB_USER,
   DB_PASSWORD,
   DB_NAME,
+  DB_SSL_CA,
   SESSION_SECRET,
   UPLOAD_DIR = "uploads",
   APP_ORIGIN = "http://127.0.0.1:5000",
@@ -34,6 +38,13 @@ if (isProduction && !SESSION_SECRET) {
 if (isProduction && !APP_ORIGIN.startsWith("https://")) {
   throw new Error("APP_ORIGIN must use HTTPS in production");
 }
+const isLocalDatabase = ["localhost", "127.0.0.1", "::1"].includes((DB_HOST || "").toLowerCase());
+if (isProduction && !isLocalDatabase && !DB_SSL_CA) {
+  throw new Error("DB_SSL_CA is required for remote production databases");
+}
+const dbSsl = DB_SSL_CA
+  ? { ca: fs.readFileSync(DB_SSL_CA), rejectUnauthorized: true }
+  : undefined;
 
 const app = express();
 if (isProduction) app.set("trust proxy", 1);
@@ -66,16 +77,49 @@ app.use(requireSameOrigin);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// ------------------------------------------------------
+// MySQL
+// ------------------------------------------------------
+const pool = mysql.createPool({
+  host: DB_HOST,
+  port: +DB_PORT,
+  user: DB_USER,
+  password: DB_PASSWORD,
+  database: DB_NAME,
+  connectionLimit: 10,
+  timezone: "Z",
+  supportBigNumbers: true,
+  dateStrings: true,
+  ssl: dbSsl,
+});
+
+async function q(sql, params = []) {
+  const [rows] = await pool.execute(sql, params);
+  return rows;
+}
+
+const sessionStore = isProduction
+  ? new MySQLStore({
+      clearExpired: true,
+      checkExpirationInterval: 15 * 60 * 1000,
+      expiration: 8 * 60 * 60 * 1000,
+      createDatabaseTable: false,
+      endConnectionOnClose: false,
+    }, pool)
+  : undefined;
+
 // Sessions: Same-origin HTTP friendly
 app.use(
   session({
     secret: SESSION_SECRET,
+    store: sessionStore,
     resave: false,
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
       secure: isProduction,
-      sameSite: "lax"
+      sameSite: "lax",
+      maxAge: 8 * 60 * 60 * 1000
     }
   })
 );
@@ -99,32 +143,28 @@ if (fs.existsSync(PUBLIC_DIR)) {
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 // ------------------------------------------------------
-// MySQL
-// ------------------------------------------------------
-const pool = mysql.createPool({
-  host: DB_HOST,
-  port: +DB_PORT,
-  user: DB_USER,
-  password: DB_PASSWORD,
-  database: DB_NAME,
-  connectionLimit: 10,
-  timezone: "Z",
-  supportBigNumbers: true,
-  dateStrings: true,
-});
-
-async function q(sql, params = []) {
-  const [rows] = await pool.query(sql, params);
-  return rows;
-}
-
-// ------------------------------------------------------
 // Role Guards
 // ------------------------------------------------------
 function requireAuth(req, res, next) {
-  if (!req.session?.user)
-    return res.status(401).json({ error: "Not authenticated" });
-  next();
+  const sessionUser = req.session?.user;
+  if (!sessionUser) return res.status(401).json({ error: "Not authenticated" });
+
+  pool.execute(
+    `SELECT person_id, role FROM users WHERE user_id=? LIMIT 1`,
+    [sessionUser.user_id]
+  ).then(([rows]) => {
+    const currentUser = rows[0];
+    const refreshedUser = refreshSessionUser(sessionUser, currentUser);
+    if (!refreshedUser) {
+      return req.session.destroy((err) => {
+        if (err) return next(err);
+        res.status(401).json({ error: "Not authenticated" });
+      });
+    }
+
+    req.session.user = refreshedUser;
+    next();
+  }).catch(next);
 }
 
 function allowRoles(...roles) {
@@ -158,6 +198,8 @@ function allowSelfOrRoles(resolveTargetPID, ...roles) {
 const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: "draft-7", legacyHeaders: false });
 const registerLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 5, standardHeaders: "draft-7", legacyHeaders: false });
 const inviteLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 20, standardHeaders: "draft-7", legacyHeaders: false });
+const uploadLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: "draft-7", legacyHeaders: false });
+const limitConcurrentUploads = createConcurrencyLimit(4);
 
 app.post("/api/auth/invites", inviteLimiter, requireAuth, allowRoles("admin"), async (req, res, next) => {
   const email = String(req.body.email || "").trim().toLowerCase();
@@ -165,7 +207,7 @@ app.post("/api/auth/invites", inviteLimiter, requireAuth, allowRoles("admin"), a
   if (!email || !personId) return res.status(400).json({ error: "Email and person_id required" });
 
   try {
-    const [people] = await pool.query(`SELECT person_id FROM people WHERE person_id=? AND email=? LIMIT 1`, [personId, email]);
+    const [people] = await pool.execute(`SELECT person_id FROM people WHERE person_id=? AND email=? LIMIT 1`, [personId, email]);
     if (!people.length) return res.status(400).json({ error: "Person identity does not match email" });
     const token = crypto.randomBytes(32).toString("hex");
     await q(
@@ -197,7 +239,7 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
   try {
     await conn.beginTransaction();
 
-    const [invites] = await conn.query(
+    const [invites] = await conn.execute(
       `SELECT invite_id, person_id, email
        FROM registration_invites
        WHERE token_hash=? AND used_at IS NULL AND expires_at > UTC_TIMESTAMP()
@@ -210,7 +252,7 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
       return res.status(400).json({ error: "Invalid or expired invitation" });
     }
 
-    const [u] = await conn.query(
+    const [u] = await conn.execute(
       `INSERT INTO users (email, username, password_hash, role)
        VALUES (?, ?, ?, 'user')`,
       [email.trim().toLowerCase(), username || null, hash]
@@ -218,8 +260,8 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
 
     const userId = u.insertId;
     const personId = invite.person_id;
-    await conn.query(`UPDATE users SET person_id=? WHERE user_id=?`, [personId, userId]);
-    await conn.query(`UPDATE registration_invites SET used_at=UTC_TIMESTAMP() WHERE invite_id=?`, [invite.invite_id]);
+    await conn.execute(`UPDATE users SET person_id=? WHERE user_id=?`, [personId, userId]);
+    await conn.execute(`UPDATE registration_invites SET used_at=UTC_TIMESTAMP() WHERE invite_id=?`, [invite.invite_id]);
 
     await conn.commit();
 
@@ -243,7 +285,7 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
   if (!email || !password)
     return res.status(400).json({ error: "Missing login fields" });
 
-  const [rows] = await pool.query(
+  const [rows] = await pool.execute(
     `SELECT user_id, email, username, password_hash, person_id, role
      FROM users WHERE email=? LIMIT 1`,
     [email]
@@ -545,13 +587,13 @@ app.post(
         await conn.beginTransaction();
 
         // --- Category (ensure exists, get id)
-        let [rows] = await conn.query(
+        let [rows] = await conn.execute(
           `SELECT category_id FROM categories WHERE name=? LIMIT 1`,
           [categoryName]
         );
         let category_id = rows[0]?.category_id;
         if (!category_id) {
-          const [ins] = await conn.query(
+          const [ins] = await conn.execute(
             `INSERT INTO categories (name) VALUES (?)`,
             [categoryName]
           );
@@ -561,13 +603,13 @@ app.post(
         // --- Provider (optional)
         let provider_id = null;
         if (providerName) {
-          [rows] = await conn.query(
+          [rows] = await conn.execute(
             `SELECT provider_id FROM providers WHERE name=? LIMIT 1`,
             [providerName]
           );
           provider_id = rows[0]?.provider_id;
           if (!provider_id) {
-            const [ins] = await conn.query(
+            const [ins] = await conn.execute(
               `INSERT INTO providers (name) VALUES (?)`,
               [providerName]
             );
@@ -582,7 +624,7 @@ app.post(
             (name, description, type, category_id, provider_id, validity_days, is_active)
           VALUES (?, ?, ?, ?, ?, ?, 1)
         `;
-        const [result] = await conn.query(sql, [
+        const [result] = await conn.execute(sql, [
           name,
           description || null,
           type,
@@ -627,6 +669,12 @@ app.get("/api/records", requireAuth, async (req, res, next) => {
     params.push(likeWrap(search), likeWrap(search), likeWrap(search));
   }
 
+  const scope = personScope(req.session.user, "tr.person_id");
+  if (scope.clause) {
+    where.push(scope.clause);
+    params.push(...scope.params);
+  }
+
   const whereSQL = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
   try {
@@ -650,6 +698,7 @@ app.get("/api/records", requireAuth, async (req, res, next) => {
     );
 
     // 3rd‑party
+    const thirdPartyScope = personScope(req.session.user, "p.person_id");
     const third = await q(
       `SELECT
           t.cert_id AS training_record_id,
@@ -666,7 +715,9 @@ app.get("/api/records", requireAuth, async (req, res, next) => {
           NULL AS assessor
        FROM third_party_certifications t
        JOIN people p ON p.person_id=t.person_id
-       ORDER BY t.completion_date DESC`
+       ${thirdPartyScope.clause ? `WHERE ${thirdPartyScope.clause}` : ""}
+      ORDER BY t.completion_date DESC`,
+      thirdPartyScope.params
     );
 
     res.json([...training, ...third]);
@@ -687,7 +738,7 @@ const allowedMimeTypes = new Set([
 ]);
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 },
+  limits: { fileSize: 10 * 1024 * 1024, files: 1, fields: 12, parts: 13, fieldSize: 64 * 1024 },
   fileFilter: (_req, file, cb) => {
     if (!allowedMimeTypes.has(file.mimetype)) {
       return cb(new multer.MulterError("LIMIT_UNEXPECTED_FILE", "file"));
@@ -712,7 +763,7 @@ async function persistUpload(file) {
 app.get("/api/files/:filename", requireAuth, async (req, res, next) => {
   const filename = path.basename(req.params.filename);
   try {
-    const [rows] = await pool.query(
+    const [rows] = await pool.execute(
       `SELECT a.file_name, a.file_path, a.mime_type, tr.person_id
        FROM attachments a JOIN training_records tr ON tr.training_record_id=a.training_record_id
        WHERE a.file_path=?
@@ -739,6 +790,8 @@ app.get("/api/files/:filename", requireAuth, async (req, res, next) => {
 app.post(
   "/api/records",
   requireAuth,
+  uploadLimiter,
+  limitConcurrentUploads,
   upload.single("file"),
   allowSelfOrRoles(async (req) => {
     const [p] = await q(`SELECT person_id FROM people WHERE email=?`, [
@@ -767,20 +820,20 @@ app.post(
       await conn.beginTransaction();
 
       // Upsert person
-      await conn.query(
+      await conn.execute(
         `INSERT INTO people (display_name, email, is_active)
          VALUES (?, ?, 1)
          ON DUPLICATE KEY UPDATE display_name=VALUES(display_name)`,
         [name, email]
       );
 
-      const [p] = await conn.query(
+      const [p] = await conn.execute(
         `SELECT person_id FROM people WHERE email=?`,
         [email]
       );
       const person_id = p[0].person_id;
 
-      const [ins] = await conn.query(
+      const [ins] = await conn.execute(
         `INSERT INTO training_records 
            (person_id, course_id, completion_date, notes, assessor)
          VALUES (?, ?, ?, ?, ?)`,
@@ -795,7 +848,7 @@ app.post(
 
       if (file) {
         const rel = savedFile.filename;
-        await conn.query(
+        await conn.execute(
           `INSERT INTO attachments 
              (training_record_id, file_name, file_path, mime_type)
            VALUES (?, ?, ?, ?)`,
@@ -822,6 +875,8 @@ app.put(
   "/api/records/:id",
   requireAuth,
   allowRoles("admin", "manager"),
+  uploadLimiter,
+  limitConcurrentUploads,
   upload.single("file"),
   async (req, res, next) => {
     const id = Number(req.params.id);
@@ -835,7 +890,7 @@ app.put(
       savedFile = await persistUpload(file);
       await conn.beginTransaction();
 
-      await conn.query(
+      await conn.execute(
         `UPDATE training_records
          SET course_id=?, completion_date=?, notes=?, assessor=?
          WHERE training_record_id=?`,
@@ -850,7 +905,7 @@ app.put(
 
       if (file) {
         const rel = savedFile.filename;
-        await conn.query(
+        await conn.execute(
           `INSERT INTO attachments 
              (training_record_id, file_name, file_path, mime_type)
            VALUES (?, ?, ?, ?)`,
@@ -941,7 +996,7 @@ app.get(
         out.push("BEGIN:VEVENT");
         out.push(`UID:${uid}`);
         out.push(`DTSTAMP:${dtstamp}`);
-        out.push(`SUMMARY:Certificate expiry - ${r.title}`);
+        out.push(`SUMMARY:Certificate expiry - ${escapeIcsText(r.title)}`);
         out.push(`DTSTART;VALUE=DATE:${start}`);
         out.push(`DTEND;VALUE=DATE:${end}`);
         out.push("BEGIN:VALARM");
@@ -1019,7 +1074,7 @@ app.get(
         out.push("BEGIN:VEVENT");
         out.push(`UID:${uid}`);
         out.push(`DTSTAMP:${dtstamp}`);
-        out.push(`SUMMARY:Certificate expiry - ${r.title}`);
+        out.push(`SUMMARY:Certificate expiry - ${escapeIcsText(r.title)}`);
         out.push(`DTSTART;VALUE=DATE:${start}`);
         out.push(`DTEND;VALUE=DATE:${end}`);
         // VALARM must come AFTER VEVENT properties for New Outlook
@@ -1083,6 +1138,8 @@ app.get(
 app.post(
   "/api/thirdparty",
   requireAuth,
+  uploadLimiter,
+  limitConcurrentUploads,
   upload.single("file"),
   allowSelfOrRoles((req) => Number(req.body.person_id), "admin", "manager"),
   async (req, res, next) => {
@@ -1136,6 +1193,8 @@ app.put(
   "/api/thirdparty/:id",
   requireAuth,
   allowRoles("admin", "manager"),
+  uploadLimiter,
+  limitConcurrentUploads,
   upload.single("file"),
   async (req, res, next) => {
     const certId = Number(req.params.id);
@@ -1148,7 +1207,7 @@ app.put(
       savedFile = await persistUpload(file);
       await conn.beginTransaction();
 
-      await conn.query(
+      await conn.execute(
         `UPDATE third_party_certifications
          SET title=?, provider=?, completion_date=?, expiry_date=?, notes=?
          WHERE cert_id=?`,
@@ -1157,7 +1216,7 @@ app.put(
 
       if (file) {
         const filePath = savedFile.filename;
-        await conn.query(
+        await conn.execute(
           `UPDATE third_party_certifications
            SET file_path=?, mime_type=?
            WHERE cert_id=?`,
@@ -1251,8 +1310,8 @@ app.get(
         "BEGIN:VEVENT",
         `UID:${uid}`,
         `DTSTAMP:${dtstamp}`,
-        `SUMMARY:Certificate expiry - ${row.title}`,
-        `DESCRIPTION:${row.employee} (${row.email}) certificate expires`,
+        `SUMMARY:Certificate expiry - ${escapeIcsText(row.title)}`,
+        `DESCRIPTION:${escapeIcsText(row.employee)} (${escapeIcsText(row.email)}) certificate expires`,
         `DTSTART;VALUE=DATE:${start}`,
         `DTEND;VALUE=DATE:${end}`,
         "BEGIN:VALARM",
@@ -1401,6 +1460,7 @@ app.get(
 // ------------------------------------------------------
 app.get("/api/expiring", requireAuth, async (req, res, next) => {
   try {
+    const internalScope = personScope(req.session.user, "tr.person_id");
     const upcomingInternal = await q(
       `SELECT 
           p.display_name AS employee,
@@ -1411,9 +1471,12 @@ app.get("/api/expiring", requireAuth, async (req, res, next) => {
        JOIN people p ON p.person_id = tr.person_id
        JOIN courses c ON c.course_id = tr.course_id
        WHERE tr.expiry_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 90 DAY)
-       ORDER BY tr.expiry_date ASC`
+       ${internalScope.clause ? `AND ${internalScope.clause}` : ""}
+       ORDER BY tr.expiry_date ASC`,
+      internalScope.params
     );
 
+     const thirdPartyScope = personScope(req.session.user, "t.person_id");
     const upcomingTP = await q(
       `SELECT
           p.display_name AS employee,
@@ -1423,7 +1486,9 @@ app.get("/api/expiring", requireAuth, async (req, res, next) => {
        FROM third_party_certifications t
        JOIN people p ON p.person_id = t.person_id
        WHERE t.expiry_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 90 DAY)
-       ORDER BY t.expiry_date ASC`
+      ${thirdPartyScope.clause ? `AND ${thirdPartyScope.clause}` : ""}
+      ORDER BY t.expiry_date ASC`,
+          thirdPartyScope.params
     );
 
     res.json([...upcomingInternal, ...upcomingTP]);
@@ -1662,7 +1727,7 @@ app.get(
         out.push("BEGIN:VEVENT");
         out.push(`UID:${uid}`);
         out.push(`DTSTAMP:${dtstamp}`);
-        out.push(`SUMMARY:Certificate expiry - ${r.title}`);
+        out.push(`SUMMARY:Certificate expiry - ${escapeIcsText(r.title)}`);
         out.push(`DTSTART;VALUE=DATE:${start}`);
         out.push(`DTEND;VALUE=DATE:${end}`);
         out.push("BEGIN:VALARM");
@@ -1710,6 +1775,7 @@ app.get("/api/course/:id/details", requireAuth, async (req, res, next) => {
 
     if (!course) return res.status(404).json({ error: "Course not found" });
 
+    const recordScope = personScope(req.session.user, "tr.person_id");
     const records = await q(
       `SELECT 
           tr.training_record_id,
@@ -1725,9 +1791,9 @@ app.get("/api/course/:id/details", requireAuth, async (req, res, next) => {
           END AS status
        FROM training_records tr
        JOIN people p ON p.person_id = tr.person_id
-       WHERE tr.course_id=?
+      WHERE tr.course_id=? ${recordScope.clause ? `AND ${recordScope.clause}` : ""}
        ORDER BY tr.completion_date DESC`,
-      [courseId]
+          [courseId, ...recordScope.params]
     );
 
     res.json({ course, records });
@@ -1737,23 +1803,6 @@ app.get("/api/course/:id/details", requireAuth, async (req, res, next) => {
 });
 
 // ------------------------------------------------------
-// Global Error Handler
-// ------------------------------------------------------
-app.use((err, _req, res, _next) => {
-  console.error("SERVER ERROR:", err);
-  if (err instanceof multer.MulterError) {
-    return res.status(400).json({ error: "Invalid or oversized upload" });
-  }
-  res.status(500).json({ error: "Server error" });
-});
-
-// ------------------------------------------------------
-// Start Server
-// ------------------------------------------------------
-app.listen(PORT, () => {
-  console.log(`API + Frontend listening on http://127.0.0.1:${PORT}`);
-});
-
 app.put(
   "/api/courses/:id",
   requireAuth,
@@ -1779,3 +1828,21 @@ app.put(
     }
   }
 );
+
+// ------------------------------------------------------
+// Global Error Handler
+// ------------------------------------------------------
+app.use((err, _req, res, _next) => {
+  console.error("Server request failed");
+  if (err instanceof multer.MulterError) {
+    return res.status(400).json({ error: "Invalid or oversized upload" });
+  }
+  res.status(500).json({ error: "Server error" });
+});
+
+// ------------------------------------------------------
+// Start Server
+// ------------------------------------------------------
+app.listen(PORT, () => {
+  console.log(`API + Frontend listening on http://127.0.0.1:${PORT}`);
+});

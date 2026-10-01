@@ -18,9 +18,12 @@ npm install \
 
 # Production requirements
 # 1. Create certapp_app with a unique secret and grant only SELECT/INSERT/UPDATE/DELETE
-#    as shown in Database schema.sql. Rotate the old certadmin/password123 credential.
+#    as shown in Database schema.sql. Keep replacement credentials out of source control.
 # 2. Set DB_PASSWORD to that rotated secret and keep it out of source control.
 # 3. Store uploads outside the public web root (for example /var/lib/certapp/uploads).
 # 4. Terminate HTTPS at the reverse proxy/load balancer and proxy to this Node process.
 #    Set NODE_ENV=production; the app then sets secure session cookies and trusts one proxy.
+#    Apply the sessions table from Database schema.sql before starting production.
+#    Apply Session schema.sql after Database schema.sql before starting production.
+#    Set DB_SSL_CA to the database provider's CA file when DB_HOST is remote.
 # 5. Use a long random SESSION_SECRET.
