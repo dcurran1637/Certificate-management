@@ -1,29 +1,41 @@
-# Ensure system is updated
-sudo apt update
+# Local installation
 
-# Install Node.js + npm
-sudo apt install -y nodejs npm
+Requirements: Node.js 20 or newer and MySQL 8.0 or newer.
 
-# Install MySQL Server
-sudo apt install -y mysql-server
+1. Install dependencies from the project root:
 
-# Install required Node backend packages
-npm install \
-  express \
-  express-session \
-  mysql2 \
-  multer \
-  bcrypt \
-  dotenv
+  ```sh
+  npm ci
+  ```
 
-# Production requirements
-# 1. Create certapp_app with a unique secret and grant only SELECT/INSERT/UPDATE/DELETE
-#    as shown in Database schema.sql. Keep replacement credentials out of source control.
-# 2. Set DB_PASSWORD to that rotated secret and keep it out of source control.
-# 3. Store uploads outside the public web root (for example /var/lib/certapp/uploads).
-# 4. Terminate HTTPS at the reverse proxy/load balancer and proxy to this Node process.
-#    Set NODE_ENV=production; the app then sets secure session cookies and trusts one proxy.
-#    Apply the sessions table from Database schema.sql before starting production.
-#    Apply Session schema.sql after Database schema.sql before starting production.
-#    Set DB_SSL_CA to the database provider's CA file when DB_HOST is remote.
-# 5. Use a long random SESSION_SECRET.
+2. Make a permission-restricted temporary copy of `Database schema.sql` and
+  replace `<ROTATED_SECRET>` in that copy with a unique MySQL password. Apply
+  the temporary copy, then delete it. The checked-in schema creates a database
+  named `certapp` and a local-only MySQL app user:
+
+  ```sh
+  schema_copy=$(mktemp)
+  chmod 600 "$schema_copy"
+  cp "Database schema.sql" "$schema_copy"
+  nano "$schema_copy"
+  sudo mysql < "$schema_copy"
+  sudo mysql < "Session schema.sql"
+  rm -f "$schema_copy"
+  ```
+
+3. Copy `.env.example` to `.env`. Set `DB_NAME=certapp`, set `DB_PASSWORD` to
+  the same secret used in the temporary SQL copy, and set a long random
+  `SESSION_SECRET`. Keep `.env` private and out of source control.
+
+4. Start the app and open http://127.0.0.1:5000:
+
+  ```sh
+  npm start
+  ```
+
+5. Run the test suite with `npm test`.
+
+For a public production deployment, use [DEPLOYMENT.md](DEPLOYMENT.md). It
+covers HTTPS, persistent sessions, uploads, and first-admin setup. The
+`init-db` package script refers to a file that is not included; use the SQL
+schema files above instead.
