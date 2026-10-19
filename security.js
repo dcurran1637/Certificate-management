@@ -70,11 +70,33 @@ function createConcurrencyLimit(maxConcurrent) {
   };
 }
 
+function validateBootstrapAdminConfig({ email, name, password }) {
+  const normalizedEmail = typeof email === "string" ? email.trim().toLowerCase() : "";
+  const normalizedName = typeof name === "string" ? name.trim() : "";
+
+  if (
+    !normalizedName
+    || normalizedName.length > 255
+    || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)
+    || normalizedEmail.length > 255
+    || typeof password !== "string"
+    || password.length < 12
+    || Buffer.byteLength(password, "utf8") > 72
+  ) {
+    throw new Error(
+      "Bootstrap admin requires a valid email, name, and a password between 12 and 72 UTF-8 bytes"
+    );
+  }
+
+  return { email: normalizedEmail, name: normalizedName, password };
+}
+
 module.exports = {
   personScope,
   refreshSessionUser,
   createConcurrencyLimit,
   csrfTokenMatches,
   requireCsrf,
-  isAllowedUploadMimeType
+  isAllowedUploadMimeType,
+  validateBootstrapAdminConfig
 };

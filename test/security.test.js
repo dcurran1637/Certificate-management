@@ -9,7 +9,8 @@ const {
   createConcurrencyLimit,
   csrfTokenMatches,
   requireCsrf,
-  isAllowedUploadMimeType
+  isAllowedUploadMimeType,
+  validateBootstrapAdminConfig
 } = require("../security");
 const { escapeIcsText, csvCell } = require("../public/export-utils");
 
@@ -81,6 +82,30 @@ test("uploads allow only PDF, JPEG, and PNG MIME types", () => {
   }
   for (const mimeType of ["image/gif", "image/webp", "image/svg+xml", "text/plain", ""]) {
     assert.equal(isAllowedUploadMimeType(mimeType), false);
+  }
+});
+
+test("bootstrap admin configuration normalizes the email and validates required fields", () => {
+  assert.deepEqual(
+    validateBootstrapAdminConfig({
+      email: " Admin@Example.com ",
+      name: " Initial Admin ",
+      password: "long-unique-password"
+    }),
+    {
+      email: "admin@example.com",
+      name: "Initial Admin",
+      password: "long-unique-password"
+    }
+  );
+
+  for (const config of [
+    { email: "", name: "Initial Admin", password: "long-unique-password" },
+    { email: "admin@example.com", name: "", password: "long-unique-password" },
+    { email: "admin@example.com", name: "Initial Admin", password: "short" },
+    { email: "admin@example.com", name: "Initial Admin", password: "é".repeat(37) }
+  ]) {
+    assert.throws(() => validateBootstrapAdminConfig(config));
   }
 });
 

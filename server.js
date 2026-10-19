@@ -20,7 +20,8 @@ const {
   refreshSessionUser,
   createConcurrencyLimit,
   requireCsrf,
-  isAllowedUploadMimeType
+  isAllowedUploadMimeType,
+  validateBootstrapAdminConfig
 } = require("./security");
 const { escapeIcsText } = require("./public/export-utils");
 
@@ -103,6 +104,96 @@ const pool = mysql.createPool({
 async function q(sql, params = []) {
   const [rows] = await pool.execute(sql, params);
   return rows;
+}
+
+async function bootstrapAdmin() {
+  const credentials = {
+    email: process.env.BOOTSTRAP_ADMIN_EMAIL,
+    name: process.env.BOOTSTRAP_ADMIN_NAME,
+    password: process.env.BOOTSTRAP_ADMIN_PASSWORD
+  };
+  delete process.env.BOOTSTRAP_ADMIN_EMAIL;
+  delete process.env.BOOTSTRAP_ADMIN_NAME;
+  delete process.env.BOOTSTRAP_ADMIN_PASSWORD;
+
+  const conn = await pool.getConnection();
+  let lockAcquired = false;
+  let transactionStarted = false;
+  try {
+    const [locks] = await conn.execute(
+      `SELECT GET_LOCK('certapp-bootstrap-admin', 10) AS acquired`
+    );
+    if (locks[0]?.acquired !== 1) {
+      throw new Error("Could not acquire the bootstrap admin lock");
+    }
+    lockAcquired = true;
+
+    await conn.beginTransaction();
+    transactionStarted = true;
+
+    const [admins] = await conn.execute(
+      `SELECT user_id FROM users WHERE role='admin' LIMIT 1 FOR UPDATE`
+    );
+    if (admins.length) {
+      await conn.commit();
+      transactionStarted = false;
+      console.log("Bootstrap admin skipped; an administrator already exists.");
+      return;
+    }
+
+    if ([credentials.email, credentials.name, credentials.password].every((value) => !value)) {
+      throw new Error(
+        "No administrator exists; configure BOOTSTRAP_ADMIN_NAME, BOOTSTRAP_ADMIN_EMAIL, and BOOTSTRAP_ADMIN_PASSWORD"
+      );
+    }
+    const config = validateBootstrapAdminConfig(credentials);
+    const passwordHash = await bcrypt.hash(config.password, 10);
+    config.password = "";
+    credentials.password = "";
+
+    const [existingUsers] = await conn.execute(
+      `SELECT user_id FROM users WHERE email=? LIMIT 1 FOR UPDATE`,
+      [config.email]
+    );
+    if (existingUsers.length) {
+      throw new Error("Bootstrap admin email already belongs to a user account");
+    }
+
+    const [existingPeople] = await conn.execute(
+      `SELECT person_id FROM people WHERE email=? LIMIT 1 FOR UPDATE`,
+      [config.email]
+    );
+    let personId = existingPeople[0]?.person_id;
+    if (!personId) {
+      const [person] = await conn.execute(
+        `INSERT INTO people (display_name, email, is_active) VALUES (?, ?, 1)`,
+        [config.name, config.email]
+      );
+      personId = person.insertId;
+    }
+
+    await conn.execute(
+      `INSERT INTO users (email, username, password_hash, role, person_id)
+       VALUES (?, ?, ?, 'admin', ?)`,
+      [config.email, config.name, passwordHash, personId]
+    );
+
+    await conn.commit();
+    transactionStarted = false;
+    console.log(`Bootstrap administrator created for ${config.email}.`);
+  } catch (err) {
+    if (transactionStarted) await conn.rollback();
+    throw err;
+  } finally {
+    credentials.password = "";
+    try {
+      if (lockAcquired) {
+        await conn.execute(`SELECT RELEASE_LOCK('certapp-bootstrap-admin')`);
+      }
+    } finally {
+      conn.release();
+    }
+  }
 }
 
 const sessionStore = isProduction
@@ -2011,6 +2102,15 @@ app.use((err, _req, res, _next) => {
 // ------------------------------------------------------
 // Start Server
 // ------------------------------------------------------
-app.listen(PORT, () => {
-  console.log(`API + Frontend listening on http://127.0.0.1:${PORT}`);
+async function startServer() {
+  await bootstrapAdmin();
+  app.listen(PORT, () => {
+    console.log(`API + Frontend listening on http://127.0.0.1:${PORT}`);
+  });
+}
+
+startServer().catch(async (err) => {
+  console.error(`Server startup failed: ${err.message}`);
+  await pool.end();
+  process.exit(1);
 });
