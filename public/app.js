@@ -1,5 +1,25 @@
 const API = "";
 
+document.addEventListener("show.bs.modal", (event) => {
+  const openModalCount = document.querySelectorAll(".modal.show").length;
+  event.target.style.zIndex = String(1055 + openModalCount * 20);
+});
+
+document.addEventListener("shown.bs.modal", (event) => {
+  const backdrops = document.querySelectorAll(".modal-backdrop");
+  const backdrop = backdrops[backdrops.length - 1];
+  if (backdrop) {
+    backdrop.style.zIndex = String(Number(event.target.style.zIndex) - 10);
+  }
+});
+
+document.addEventListener("hidden.bs.modal", (event) => {
+  event.target.style.removeProperty("z-index");
+  if (document.querySelector(".modal.show")) {
+    document.body.classList.add("modal-open");
+  }
+});
+
 /* ----------------------- Utilities ----------------------- */
 const $ = (s, r=document)=>r.querySelector(s);
 const $$=(s,r=document)=>Array.from(r.querySelectorAll(s));
@@ -65,11 +85,51 @@ function downloadCsv(filename, rows) {
 }
 
 /* -------------------- fetchJSON helper ------------------ */
+let csrfTokenPromise;
+
+async function getCsrfToken() {
+  if (!csrfTokenPromise) {
+    csrfTokenPromise = fetch(`${API}/api/auth/csrf`, {
+      credentials: "include",
+      cache: "no-store"
+    }).then(async (res) => {
+      if (!res.ok) throw new Error(`CSRF token request failed: HTTP ${res.status}`);
+      const data = await res.json();
+      if (typeof data.csrfToken !== "string" || !data.csrfToken) {
+        throw new Error("CSRF token response was invalid");
+      }
+      return data.csrfToken;
+    }).catch((err) => {
+      csrfTokenPromise = undefined;
+      throw err;
+    });
+  }
+  return csrfTokenPromise;
+}
+
+async function csrfFetch(url, options={}) {
+  const requestOptions = { ...options, credentials: "include", cache: "no-store" };
+  const method = (requestOptions.method || "GET").toUpperCase();
+  if (["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
+    const headers = new Headers(requestOptions.headers);
+    headers.set("X-CSRF-Token", await getCsrfToken());
+    requestOptions.headers = headers;
+  }
+  return fetch(url, requestOptions);
+}
+
+window.csrfFetch = csrfFetch;
+
 async function fetchJSON(url, options={}) {
-  options.credentials = "include";
-  options.cache = "no-store";   // ⬅ IMPORTANT
-  const res = await fetch(url, options);
-  if(!res.ok) throw new Error(`HTTP ${res.status}`);
+  const res = await csrfFetch(url, options);
+  if(!res.ok) {
+    let message;
+    try {
+      const data = await res.json();
+      message = data?.error || data?.message;
+    } catch {}
+    throw new Error(message || `HTTP ${res.status}`);
+  }
   const text = await res.text();
   try { return text ? JSON.parse(text) : {}; } catch(e) { return text; }
 }
@@ -393,6 +453,7 @@ async function renderDashboard() {
 ======================================================== */
 let personModal, editRecordModal, editThirdModal, confirmModal;
 let currentProfilePersonId = null;
+let inviteModal;
 
 async function renderPeople(){
   if (isUser()) return navigate("/dashboard");
@@ -400,6 +461,16 @@ async function renderPeople(){
   const tbody=$("#peopleTbody");
   const count=$("#peopleCount");
   const empty=$("#peopleEmpty");
+  $("#btnOpenInvite").classList.toggle("d-none", !isAdmin());
+  $("#btnOpenInvite").onclick = () => {
+    inviteModal = inviteModal || new bootstrap.Modal("#inviteModal");
+    $("#inviteForm").reset();
+    $("#inviteTokenPanel").classList.add("d-none");
+    $("#inviteTokenValue").value = "";
+    $("#btnCreateInvite").disabled = false;
+    $("#btnCreateInvite").textContent = "Create invite";
+    inviteModal.show();
+  };
 
   try{
     const people=await fetchJSON(`${API}/api/people`);
@@ -426,6 +497,43 @@ async function renderPeople(){
       const tr=e.target.closest("tr[data-person-id]");
       if(!tr)return;
       openPersonProfile(+tr.dataset.personId);
+    };
+
+    $("#inviteForm").onsubmit = async (e) => {
+      e.preventDefault();
+      const button = $("#btnCreateInvite");
+      button.disabled = true;
+      try {
+        const response = await csrfFetch(`${API}/api/auth/invites`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: $("#inviteName").value.trim(),
+            email: $("#inviteEmail").value.trim()
+          })
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not create invite");
+
+        $("#inviteTokenValue").value = result.invite_token;
+        $("#inviteTokenPanel").classList.remove("d-none");
+        button.disabled = false;
+        button.textContent = "Create another invite";
+        await renderPeople();
+      } catch (err) {
+        button.disabled = false;
+        showToast("Invite failed", err.message || "Could not create invite.", "danger");
+      }
+    };
+
+    $("#btnCopyInvite").onclick = async () => {
+      try {
+        await navigator.clipboard.writeText($("#inviteTokenValue").value);
+        showToast("Copied", "Invitation token copied to clipboard.", "success");
+      } catch {
+        $("#inviteTokenValue").select();
+        showToast("Copy unavailable", "Select the token and copy it manually.", "warning");
+      }
     };
 
   }catch(err){
@@ -530,7 +638,8 @@ async function openEditCourseModal(id) {
   editCourseModal.show();
 }
 
-document.getElementById("editCourseForm").addEventListener("submit", async (e) => {
+document.addEventListener("submit", async (e) => {
+  if (e.target.id !== "editCourseForm") return;
   e.preventDefault();
 
   const id = $("#editCourseId").value;
@@ -578,7 +687,6 @@ async function openPersonProfile(personId) {
 
   $("#personName").textContent = "Loading...";
   $("#personEmail").textContent = "";
-
   $("#personTrainingTbody").innerHTML = "";
   $("#personThirdTbody").innerHTML = "";
   show($("#personTrainingSpinner"));
@@ -863,12 +971,49 @@ async function renderMyTraining(){
 
     empty.hidden=true;
     tbody.innerHTML=list.map(r=>`
-      <tr>
+      <tr data-record-type="${r.record_type}" data-record-id="${r.record_id}">
         <td>${esc(r.course)}</td>
         <td>${fmt(r.completed)}</td>
         <td>${fmt(r.expires)}</td>
         <td>${statusBadge(r.status)}</td>
+        <td class="text-end text-nowrap">
+          <button class="btn btn-sm btn-outline-primary me-1" data-action="edit-my-record" title="Edit">
+            <i class="bi bi-pencil"></i><span class="visually-hidden">Edit</span>
+          </button>
+          <button class="btn btn-sm btn-outline-danger" data-action="delete-my-record" title="Delete">
+            <i class="bi bi-trash"></i><span class="visually-hidden">Delete</span>
+          </button>
+        </td>
       </tr>`).join("");
+
+    tbody.onclick = async (event) => {
+      const button = event.target.closest("[data-action]");
+      const row = button?.closest("tr[data-record-id]");
+      if (!button || !row) return;
+
+      if (button.dataset.action === "edit-my-record") {
+        if (row.dataset.recordType === "training") {
+          openEditRecordModal(row.dataset.recordId, true);
+        } else {
+          openEditThirdModal(row.dataset.recordId, acc.person_id, true);
+        }
+        return;
+      }
+
+      if (button.dataset.action === "delete-my-record") {
+        const type = row.dataset.recordType;
+        const label = type === "training" ? "training record" : "third-party certificate";
+        if (!window.confirm(`Delete this ${label}? This cannot be undone.`)) return;
+        try {
+          const endpoint = type === "training" ? "records" : "thirdparty";
+          await fetchJSON(`${API}/api/${endpoint}/${row.dataset.recordId}`, { method: "DELETE" });
+          showToast("Deleted", `${type === "training" ? "Training record" : "Certificate"} deleted.`, "success");
+          await renderMyTraining();
+        } catch (err) {
+          showToast("Error", err.message || `Failed to delete ${label}.`, "danger");
+        }
+      }
+    };
 
     /* ---------- ICS BUTTON WIRING ---------- */
     const pid = acc.person_id;
@@ -948,7 +1093,7 @@ async function handleRecordSubmit(e){
   if(file) fd.append("file",file);
 
   try{
-    const res=await fetch(`${API}/api/records`,{method:"POST", credentials:"include", body:fd});
+    const res=await csrfFetch(`${API}/api/records`,{method:"POST", body:fd});
     if(!res.ok) throw new Error();
     bootstrap.Modal.getInstance("#recordModal").hide();
     showToast("Saved","Training added","success");
@@ -998,8 +1143,8 @@ async function handleThirdPartySubmit(e){
 /* ========================================================
    EDIT / DELETE (MANAGER/ADMIN ONLY)
 ======================================================== */
-async function openEditRecordModal(id){
-  if (!isAdminOrManager()) return showToast("Forbidden","Not allowed","danger");
+async function openEditRecordModal(id, selfService=false){
+  if (!isAdminOrManager() && !selfService) return showToast("Forbidden","Not allowed","danger");
   editRecordModal = editRecordModal || new bootstrap.Modal("#editRecordModal");
   $("#editRecordForm").reset();
   $("#editRecId").value=id;
@@ -1015,7 +1160,7 @@ async function openEditRecordModal(id){
     $("#editRecAssessor").value = rec.assessor || "";
     editRecordModal.show();
   }catch(err){
-    showToast("Error","Cannot open","danger");
+    showToast("Error",err.message || "Cannot open","danger");
   }
 }
 
@@ -1034,9 +1179,10 @@ $("#editRecordForm")?.addEventListener("submit",async e=>{
     await fetchJSON(`${API}/api/records/${id}`,{method:"PUT", body:fd});
     editRecordModal.hide();
     showToast("Saved","Record updated","success");
-    openPersonProfile(currentProfilePersonId);
+    if (currentRoute() === "/my-training") await renderMyTraining();
+    else if (currentProfilePersonId) openPersonProfile(currentProfilePersonId);
   }catch(err){
-    showToast("Error","Failed","danger");
+    showToast("Error",err.message || "Failed to save training","danger");
   }
 });
 
@@ -1057,8 +1203,8 @@ async function deleteRecord(id,pid){
   openPersonProfile(pid);
 }
 
-async function openEditThirdModal(certId, pid){
-  if (!isAdminOrManager()) return showToast("Forbidden","Not allowed","danger");
+async function openEditThirdModal(certId, pid, selfService=false){
+  if (!isAdminOrManager() && !selfService) return showToast("Forbidden","Not allowed","danger");
   
   editThirdModal = editThirdModal || new bootstrap.Modal("#editThirdPartyModal");
   $("#editThirdForm").reset();
@@ -1080,8 +1226,8 @@ async function openEditThirdModal(certId, pid){
 
     editThirdModal.show();
 
-  } catch {
-    showToast("Error","Cannot open certificate","danger");
+  } catch (err) {
+    showToast("Error",err.message || "Cannot open certificate","danger");
   }
 }
 
@@ -1094,26 +1240,32 @@ $("#editThirdForm")?.addEventListener("submit", async e=>{
   fd.append("title", $("#editThirdTitle").value);
   fd.append("provider", $("#editThirdProvider").value);
   fd.append("completion_date", $("#editThirdCompleted").value);
-  fd.append("expiry_date", $("#editThirdExpiry").value);
+  const expiryDate = $("#editThirdExpiry").value;
+  fd.append("expiry_date", expiryDate);
   fd.append("notes", $("#editThirdNotes").value);
 
   const file = $("#editThirdFile").files[0];
   if (file) fd.append("file", file);
 
   try {
-    await fetchJSON(`${API}/api/thirdparty/${id}`, {
+    const result = await fetchJSON(`${API}/api/thirdparty/${id}`, {
       method: "PUT",
       body: fd
     });
+    if ((result.certificate?.expiry_date || "") !== expiryDate) {
+      throw new Error("The saved expiry date did not match the date entered.");
+    }
 
     editThirdModal.hide();
-    showToast("Saved","Certification updated","success");
+    showToast("Saved", expiryDate
+      ? `Certification updated. Expiry: ${expiryDate}.`
+      : "Certification updated. No expiry date set.", "success");
 
-    // Refresh the profile section
-    openPersonProfile(pid);
+    if (currentRoute() === "/my-training") await renderMyTraining();
+    else openPersonProfile(pid);
 
-  } catch {
-    showToast("Error","Failed to save certificate","danger");
+  } catch (err) {
+    showToast("Error",err.message || "Failed to save certificate","danger");
   }
 });
 

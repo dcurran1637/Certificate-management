@@ -15,7 +15,13 @@ const multer = require("multer");
 const bcrypt = require("bcrypt");
 const rateLimit = require("express-rate-limit");
 const fileTypeFromBuffer = import("file-type").then(({ fileTypeFromBuffer }) => fileTypeFromBuffer);
-const { personScope, refreshSessionUser, createConcurrencyLimit } = require("./security");
+const {
+  personScope,
+  refreshSessionUser,
+  createConcurrencyLimit,
+  requireCsrf,
+  isAllowedUploadMimeType
+} = require("./security");
 const { escapeIcsText } = require("./public/export-utils");
 
 const {
@@ -61,7 +67,8 @@ function requireSameOrigin(req, res, next) {
   const source = req.get("origin") || req.get("referer");
   if (!source) return res.status(403).json({ error: "Request origin required" });
   try {
-    if (new URL(source).origin !== APP_ORIGIN) {
+    const sourceOrigin = new URL(source).origin;
+    if (isProduction && sourceOrigin !== new URL(APP_ORIGIN).origin) {
       return res.status(403).json({ error: "Cross-site request blocked" });
     }
   } catch (_err) {
@@ -131,6 +138,12 @@ app.use((req, res, next) => {
   }
   next();
 });
+
+app.get("/api/auth/csrf", (req, res) => {
+  req.session.csrfToken ??= crypto.randomBytes(32).toString("hex");
+  res.json({ csrfToken: req.session.csrfToken });
+});
+app.use(requireCsrf);
 
 // ------------------------------------------------------
 // Static Assets
@@ -203,21 +216,63 @@ const limitConcurrentUploads = createConcurrencyLimit(4);
 
 app.post("/api/auth/invites", inviteLimiter, requireAuth, allowRoles("admin"), async (req, res, next) => {
   const email = String(req.body.email || "").trim().toLowerCase();
-  const personId = Number(req.body.person_id);
-  if (!email || !personId) return res.status(400).json({ error: "Email and person_id required" });
+  const name = String(req.body.name || "").trim();
+  if (!name || name.length > 255 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 255) {
+    return res.status(400).json({ error: "A valid name and email are required" });
+  }
 
+  let conn;
+  let transactionStarted = false;
   try {
-    const [people] = await pool.execute(`SELECT person_id FROM people WHERE person_id=? AND email=? LIMIT 1`, [personId, email]);
-    if (!people.length) return res.status(400).json({ error: "Person identity does not match email" });
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+    transactionStarted = true;
+    const [users] = await conn.execute(`SELECT user_id FROM users WHERE email=? LIMIT 1`, [email]);
+    if (users.length) {
+      await conn.rollback();
+      return res.status(409).json({ error: "An account already exists for this email" });
+    }
+
+    const [people] = await conn.execute(
+      `SELECT person_id FROM people WHERE email=? LIMIT 1 FOR UPDATE`,
+      [email]
+    );
+    let personId = people[0]?.person_id;
+    if (personId) {
+      await conn.execute(
+        `UPDATE people SET display_name=?, is_active=1 WHERE person_id=?`,
+        [name, personId]
+      );
+    } else {
+      const [person] = await conn.execute(
+        `INSERT INTO people (display_name, email, is_active) VALUES (?, ?, 1)`,
+        [name, email]
+      );
+      personId = person.insertId;
+    }
+
+    await conn.execute(
+      `UPDATE registration_invites SET used_at=UTC_TIMESTAMP()
+       WHERE email=? AND used_at IS NULL`,
+      [email]
+    );
     const token = crypto.randomBytes(32).toString("hex");
-    await q(
+    await conn.execute(
       `INSERT INTO registration_invites (person_id, email, token_hash, expires_at)
        VALUES (?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL 24 HOUR))`,
       [personId, email, crypto.createHash("sha256").update(token).digest("hex")]
     );
-    res.status(201).json({ success: true, invite_token: token });
+    await conn.commit();
+    transactionStarted = false;
+    res.status(201).json({ success: true, person_id: personId, invite_token: token });
   } catch (err) {
+    if (conn && transactionStarted) await conn.rollback();
+    if (err.code === "ER_DUP_ENTRY") {
+      return res.status(409).json({ error: "A person or invitation already exists for this email" });
+    }
     next(err);
+  } finally {
+    conn?.release();
   }
 });
 
@@ -729,18 +784,11 @@ app.get("/api/records", requireAuth, async (req, res, next) => {
 // ------------------------------------------------------
 // CREATE TRAINING RECORD
 // ------------------------------------------------------
-const allowedMimeTypes = new Set([
-  "application/pdf",
-  "image/jpeg",
-  "image/png",
-  "image/gif",
-  "image/webp",
-]);
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024, files: 1, fields: 12, parts: 13, fieldSize: 64 * 1024 },
   fileFilter: (_req, file, cb) => {
-    if (!allowedMimeTypes.has(file.mimetype)) {
+    if (!isAllowedUploadMimeType(file.mimetype)) {
       return cb(new multer.MulterError("LIMIT_UNEXPECTED_FILE", "file"));
     }
     cb(null, true);
@@ -751,7 +799,7 @@ async function persistUpload(file) {
   if (!file) return null;
   const detectFileType = await fileTypeFromBuffer;
   const detected = await detectFileType(file.buffer);
-  if (!detected || !allowedMimeTypes.has(detected.mime)) {
+  if (!detected || !isAllowedUploadMimeType(detected.mime)) {
     throw new multer.MulterError("LIMIT_UNEXPECTED_FILE", "file");
   }
   const filename = `${crypto.randomUUID()}.${detected.ext}`;
@@ -781,7 +829,11 @@ app.get("/api/files/:filename", requireAuth, async (req, res, next) => {
     const fullPath = path.resolve(UPLOAD_DIR, filename);
     if (!fullPath.startsWith(`${path.resolve(UPLOAD_DIR)}${path.sep}`)) return res.status(404).json({ error: "File not found" });
     res.type(file.mime_type || "application/octet-stream");
-    res.download(fullPath, file.file_name || filename);
+    res.set("Content-Disposition", "inline");
+    res.set("X-Content-Type-Options", "nosniff");
+    res.sendFile(fullPath, (err) => {
+      if (err) next(err);
+    });
   } catch (err) {
     next(err);
   }
@@ -874,7 +926,13 @@ app.post(
 app.put(
   "/api/records/:id",
   requireAuth,
-  allowRoles("admin", "manager"),
+  allowSelfOrRoles(async (req) => {
+    const rows = await q(
+      `SELECT person_id FROM training_records WHERE training_record_id=? LIMIT 1`,
+      [req.params.id]
+    );
+    return rows[0]?.person_id;
+  }, "admin", "manager"),
   uploadLimiter,
   limitConcurrentUploads,
   upload.single("file"),
@@ -893,13 +951,14 @@ app.put(
       await conn.execute(
         `UPDATE training_records
          SET course_id=?, completion_date=?, notes=?, assessor=?
-         WHERE training_record_id=?`,
+         WHERE training_record_id=?${["admin", "manager"].includes(req.session.user.role) ? "" : " AND person_id=?"}`,
         [
           course_id,
           completion_date,
           notes || null,
           assessor || null,
-          id
+          id,
+          ...(["admin", "manager"].includes(req.session.user.role) ? [] : [req.session.user.person_id])
         ]
       );
 
@@ -931,12 +990,49 @@ app.put(
 app.delete(
   "/api/records/:id",
   requireAuth,
-  allowRoles("admin", "manager"),
+  allowSelfOrRoles(async (req) => {
+    const rows = await q(
+      `SELECT person_id FROM training_records WHERE training_record_id=? LIMIT 1`,
+      [req.params.id]
+    );
+    return rows[0]?.person_id;
+  }, "admin", "manager"),
   async (req, res, next) => {
-    await q(`DELETE FROM training_records WHERE training_record_id=?`, [
-      req.params.id,
-    ]);
-    res.json({ success: true });
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      const [attachments] = await conn.execute(
+        `SELECT file_path FROM attachments WHERE training_record_id=?`,
+        [req.params.id]
+      );
+      await conn.execute(
+        `DELETE FROM attachments WHERE training_record_id=?`,
+        [req.params.id]
+      );
+      await conn.execute(
+        `DELETE FROM training_records
+         WHERE training_record_id=?${["admin", "manager"].includes(req.session.user.role) ? "" : " AND person_id=?"}`,
+        ["admin", "manager"].includes(req.session.user.role)
+          ? [req.params.id]
+          : [req.params.id, req.session.user.person_id]
+      );
+      await conn.commit();
+      for (const attachment of attachments) {
+        const filename = path.basename(attachment.file_path || "");
+        const fullPath = path.resolve(UPLOAD_DIR, filename);
+        if (filename && fullPath.startsWith(`${path.resolve(UPLOAD_DIR)}${path.sep}`)) {
+          await fs.promises.unlink(fullPath).catch((err) => {
+            if (err.code !== "ENOENT") console.error("Could not remove deleted training evidence");
+          });
+        }
+      }
+      res.json({ success: true });
+    } catch (err) {
+      await conn.rollback();
+      next(err);
+    } finally {
+      conn.release();
+    }
   }
 );
 
@@ -1192,7 +1288,13 @@ app.post(
 app.put(
   "/api/thirdparty/:id",
   requireAuth,
-  allowRoles("admin", "manager"),
+  allowSelfOrRoles(async (req) => {
+    const rows = await q(
+      `SELECT person_id FROM third_party_certifications WHERE cert_id=? LIMIT 1`,
+      [req.params.id]
+    );
+    return rows[0]?.person_id;
+  }, "admin", "manager"),
   uploadLimiter,
   limitConcurrentUploads,
   upload.single("file"),
@@ -1210,8 +1312,16 @@ app.put(
       await conn.execute(
         `UPDATE third_party_certifications
          SET title=?, provider=?, completion_date=?, expiry_date=?, notes=?
-         WHERE cert_id=?`,
-        [title, provider, completion_date, expiry_date || null, notes || null, certId]
+         WHERE cert_id=?${["admin", "manager"].includes(req.session.user.role) ? "" : " AND person_id=?"}`,
+        [
+          title,
+          provider,
+          completion_date,
+          expiry_date || null,
+          notes || null,
+          certId,
+          ...(["admin", "manager"].includes(req.session.user.role) ? [] : [req.session.user.person_id])
+        ]
       );
 
       if (file) {
@@ -1219,13 +1329,30 @@ app.put(
         await conn.execute(
           `UPDATE third_party_certifications
            SET file_path=?, mime_type=?
-           WHERE cert_id=?`,
-          [filePath, savedFile.mimetype, certId]
+           WHERE cert_id=?${["admin", "manager"].includes(req.session.user.role) ? "" : " AND person_id=?"}`,
+          ["admin", "manager"].includes(req.session.user.role)
+            ? [filePath, savedFile.mimetype, certId]
+            : [filePath, savedFile.mimetype, certId, req.session.user.person_id]
         );
       }
 
+      const [updatedCerts] = await conn.execute(
+        `SELECT cert_id, title, provider, completion_date,
+                DATE_FORMAT(expiry_date, '%Y-%m-%d') AS expiry_date, notes
+         FROM third_party_certifications
+         WHERE cert_id=?${["admin", "manager"].includes(req.session.user.role) ? "" : " AND person_id=?"}`,
+        ["admin", "manager"].includes(req.session.user.role)
+          ? [certId]
+          : [certId, req.session.user.person_id]
+      );
+      if (!updatedCerts.length) {
+        const error = new Error("Certificate not found after update");
+        error.status = 404;
+        throw error;
+      }
+
       await conn.commit();
-      res.json({ success: true });
+      res.json({ success: true, certificate: updatedCerts[0] });
 
     } catch (err) {
       await conn.rollback();
@@ -1241,16 +1368,45 @@ app.put(
 app.delete(
   "/api/thirdparty/:id",
   requireAuth,
-  allowRoles("admin", "manager"),
+  allowSelfOrRoles(async (req) => {
+    const rows = await q(
+      `SELECT person_id FROM third_party_certifications WHERE cert_id=? LIMIT 1`,
+      [req.params.id]
+    );
+    return rows[0]?.person_id;
+  }, "admin", "manager"),
   async (req, res, next) => {
+    const conn = await pool.getConnection();
     try {
-      await q(
-        `DELETE FROM third_party_certifications WHERE cert_id=?`,
-        [req.params.id]
+      await conn.beginTransaction();
+      const [rows] = await conn.execute(
+        `SELECT file_path FROM third_party_certifications
+         WHERE cert_id=?${["admin", "manager"].includes(req.session.user.role) ? "" : " AND person_id=?"}`,
+        ["admin", "manager"].includes(req.session.user.role)
+          ? [req.params.id]
+          : [req.params.id, req.session.user.person_id]
       );
+      await conn.execute(
+        `DELETE FROM third_party_certifications
+         WHERE cert_id=?${["admin", "manager"].includes(req.session.user.role) ? "" : " AND person_id=?"}`,
+        ["admin", "manager"].includes(req.session.user.role)
+          ? [req.params.id]
+          : [req.params.id, req.session.user.person_id]
+      );
+      await conn.commit();
+      const filename = path.basename(rows[0]?.file_path || "");
+      const fullPath = path.resolve(UPLOAD_DIR, filename);
+      if (filename && fullPath.startsWith(`${path.resolve(UPLOAD_DIR)}${path.sep}`)) {
+        await fs.promises.unlink(fullPath).catch((err) => {
+          if (err.code !== "ENOENT") console.error("Could not remove deleted certificate evidence");
+        });
+      }
       res.json({ success: true });
     } catch (err) {
+      await conn.rollback();
       next(err);
+    } finally {
+      conn.release();
     }
   }
 );
@@ -1509,10 +1665,13 @@ app.get("/api/my", requireAuth, async (req, res, next) => {
     // Internal training records
     const training = await q(
       `SELECT 
+         'training' AS record_type,
+         tr.training_record_id AS record_id,
          c.name AS course,
          tr.completion_date AS completed,
          tr.expiry_date AS expires,
          tr.assessor AS assessor,
+         tr.notes AS notes,
          CASE
            WHEN tr.expiry_date IS NULL THEN 'current'
            WHEN tr.expiry_date < CURDATE() THEN 'expired'
@@ -1530,10 +1689,13 @@ app.get("/api/my", requireAuth, async (req, res, next) => {
     // 3rd party certifications
     const thirdparty = await q(
       `SELECT 
+         'thirdparty' AS record_type,
+         cert_id AS record_id,
          title AS course,
          completion_date AS completed,
          expiry_date AS expires,
          NULL AS assessor,
+         notes AS notes,
          CASE 
            WHEN expiry_date IS NULL THEN 'current'
            WHEN expiry_date < CURDATE() THEN 'expired'
@@ -1607,7 +1769,13 @@ app.get("/api/my", requireAuth, async (req, res, next) => {
 app.get(
   "/api/records/:id",
   requireAuth,
-  allowRoles("admin", "manager"),
+  allowSelfOrRoles(async (req) => {
+    const rows = await q(
+      `SELECT person_id FROM training_records WHERE training_record_id=? LIMIT 1`,
+      [req.params.id]
+    );
+    return rows[0]?.person_id;
+  }, "admin", "manager"),
   async (req, res, next) => {
     try {
       const id = Number(req.params.id);

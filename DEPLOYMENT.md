@@ -78,6 +78,11 @@ openssl rand -base64 48
 ```
 
 Never commit the environment file or put secrets in the application directory.
+The application issues a session-bound CSRF token and requires it on every
+state-changing request, including login and invite-based registration. The
+browser obtains and sends this token automatically; keep the existing
+same-origin `APP_ORIGIN` configuration because the origin check remains an
+additional defense.
 
 ## 4. Install the systemd service
 

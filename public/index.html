@@ -216,8 +216,15 @@
 
   <!-- People -->
   <template id="tpl-people">
-    <h1 class="h3">People</h1>
-    <p class="text-secondary small mb-3">Manage all staff, students, and trainees</p>
+    <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
+      <div>
+        <h1 class="h3">People</h1>
+        <p class="text-secondary small mb-0">Manage all staff, students, and trainees</p>
+      </div>
+      <button class="btn btn-primary" id="btnOpenInvite">
+        <i class="bi bi-person-plus me-1"></i> Invite person
+      </button>
+    </div>
 
     <div class="card">
       <div class="card-body">
@@ -389,6 +396,7 @@
                 <th>Completed</th>
                 <th>Expires</th>
                 <th>Status</th>
+                <th class="text-end">Actions</th>
               </tr>
             </thead>
             <tbody id="myTbody"></tbody>
@@ -514,7 +522,7 @@
                 <div class="row g-3 mt-0">
               <div class="col-md-12">
                 <label class="form-label">Certificate/Evidence (Optional)</label>
-                <input type="file" class="form-control" id="recFile" />
+                <input type="file" class="form-control" id="recFile" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" />
               </div>
             </div>
 
@@ -567,7 +575,7 @@
 
             <div class="mb-3 mt-3">
               <label class="form-label">Evidence File</label>
-              <input type="file" id="tpFile" class="form-control">
+              <input type="file" id="tpFile" class="form-control" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png">
             </div>
 
             <label class="form-label">Notes</label>
@@ -694,6 +702,42 @@
     </div>
   </div>
 
+  <!-- ===== Invite Person Modal ===== -->
+  <div class="modal fade" id="inviteModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content">
+        <form id="inviteForm">
+          <div class="modal-header">
+            <h5 class="modal-title">Invite person</h5>
+            <button class="btn-close" type="button" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body">
+            <p class="small text-secondary">Enter their name and email. The invite token is single-use and expires in 24 hours.</p>
+            <div class="mb-3">
+              <label class="form-label" for="inviteName">Full name</label>
+              <input class="form-control" id="inviteName" name="name" required maxlength="255">
+            </div>
+            <div class="mb-3">
+              <label class="form-label" for="inviteEmail">Email</label>
+              <input class="form-control" id="inviteEmail" name="email" type="email" required maxlength="255">
+            </div>
+            <div id="inviteTokenPanel" class="d-none">
+              <label for="inviteTokenValue" class="form-label small mb-1">Share this token with the person:</label>
+              <div class="input-group">
+                <input type="text" class="form-control font-monospace" id="inviteTokenValue" readonly>
+                <button class="btn btn-outline-secondary" id="btnCopyInvite" type="button">Copy</button>
+              </div>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-light" type="button" data-bs-dismiss="modal">Close</button>
+            <button class="btn btn-primary" type="submit" id="btnCreateInvite">Create invite</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
   <!-- ===== Edit Training Record Modal ===== -->
   <div class="modal fade" id="editRecordModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-lg modal-dialog-centered">
@@ -725,7 +769,7 @@
             </div>
             <div class="mt-3">
               <label class="form-label">Replace Evidence (optional)</label>
-              <input type="file" class="form-control" id="editRecFile">
+              <input type="file" class="form-control" id="editRecFile" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png">
             </div>
           </div>
           <div class="modal-footer">
@@ -768,7 +812,7 @@
             </div>
             <div class="mt-3">
               <label class="form-label">Replace Evidence (optional)</label>
-              <input type="file" class="form-control" id="editThirdFile">
+              <input type="file" class="form-control" id="editThirdFile" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png">
             </div>
             <div class="mt-3">
               <label class="form-label">Notes</label>
@@ -806,14 +850,14 @@
   <!-- Bootstrap JS + App -->
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz" crossorigin="anonymous"></script>
   <script src="export-utils.js"></script>
-  <script src="app.js"></script>
+  <script src="app.js?v=edit-submit-fix"></script>
 
   <!-- Logout: destroys session and clears local storage -->
   <script>
     document.getElementById('btnLogout')?.addEventListener('click', async function (e) {
       e.preventDefault();
       try {
-        await fetch(`${API}/api/auth/logout`, { method: "POST", credentials: "include" });
+        await csrfFetch(`${API}/api/auth/logout`, { method: "POST" });
       } catch {
       }
       try { sessionStorage.clear(); localStorage.clear(); } catch (err) {}

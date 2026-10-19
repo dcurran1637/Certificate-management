@@ -3,7 +3,14 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const { EventEmitter } = require("node:events");
-const { personScope, refreshSessionUser, createConcurrencyLimit } = require("../security");
+const {
+  personScope,
+  refreshSessionUser,
+  createConcurrencyLimit,
+  csrfTokenMatches,
+  requireCsrf,
+  isAllowedUploadMimeType
+} = require("../security");
 const { escapeIcsText, csvCell } = require("../public/export-utils");
 
 test("regular users are scoped to their own person id", () => {
@@ -34,6 +41,47 @@ test("session authorization uses the current database role", () => {
 test("deleted or unlinked accounts cannot keep an authenticated identity", () => {
   assert.equal(refreshSessionUser({ user_id: 7 }, undefined), null);
   assert.equal(refreshSessionUser({ user_id: 7 }, { person_id: null, role: "admin" }), null);
+});
+
+test("CSRF tokens require a matching value and reject missing or unequal tokens", () => {
+  assert.equal(csrfTokenMatches("random-token", "random-token"), true);
+  assert.equal(csrfTokenMatches("random-token", "different-token"), false);
+  assert.equal(csrfTokenMatches("random-token", ""), false);
+  assert.equal(csrfTokenMatches("random-token", undefined), false);
+});
+
+test("CSRF middleware checks every state-changing method", () => {
+  for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+    let statusCode;
+    let continued = false;
+    requireCsrf(
+      { method, session: { csrfToken: "session-token" }, get: () => "wrong-token" },
+      { status(code) { statusCode = code; return this; }, json() {} },
+      () => { continued = true; }
+    );
+    assert.equal(statusCode, 403, `${method} without the session token must be rejected`);
+    assert.equal(continued, false);
+  }
+
+  let continued = false;
+  requireCsrf(
+    { method: "POST", session: { csrfToken: "session-token" }, get: () => "session-token" },
+    {},
+    () => { continued = true; }
+  );
+  assert.equal(continued, true);
+
+  requireCsrf({ method: "GET" }, {}, () => { continued = true; });
+  assert.equal(continued, true);
+});
+
+test("uploads allow only PDF, JPEG, and PNG MIME types", () => {
+  for (const mimeType of ["application/pdf", "image/jpeg", "image/png"]) {
+    assert.equal(isAllowedUploadMimeType(mimeType), true);
+  }
+  for (const mimeType of ["image/gif", "image/webp", "image/svg+xml", "text/plain", ""]) {
+    assert.equal(isAllowedUploadMimeType(mimeType), false);
+  }
 });
 
 test("installation instructions do not include inline username/password pairs", () => {

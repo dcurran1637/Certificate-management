@@ -59,6 +59,27 @@ const API = "";
 const loginForm = document.getElementById('loginForm');
 const registerForm = document.getElementById('registerForm');
 const registerModal = document.getElementById('registerModal');
+let csrfTokenPromise;
+
+async function getCsrfToken() {
+  if (!csrfTokenPromise) {
+    csrfTokenPromise = fetch(`${API}/api/auth/csrf`, {
+      credentials: 'include',
+      cache: 'no-store'
+    }).then(async (resp) => {
+      if (!resp.ok) throw new Error(`CSRF token request failed: HTTP ${resp.status}`);
+      const data = await resp.json();
+      if (typeof data.csrfToken !== 'string' || !data.csrfToken) {
+        throw new Error('CSRF token response was invalid');
+      }
+      return data.csrfToken;
+    }).catch((err) => {
+      csrfTokenPromise = undefined;
+      throw err;
+    });
+  }
+  return csrfTokenPromise;
+}
 
 document.getElementById('btnOpenRegister').addEventListener('click', () => {
   registerModal.classList.add('open');
@@ -94,7 +115,10 @@ loginForm.addEventListener('submit', async (e) => {
     const resp = await fetch(`${API}/api/auth/login`, {
       method: 'POST',
       credentials: 'include', 
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': await getCsrfToken()
+      },
       body: JSON.stringify({ email, password })
     });
 
@@ -131,7 +155,10 @@ registerForm.addEventListener('submit', async (e) => {
     const resp = await fetch(`${API}/api/auth/register`, {
       method: 'POST',
       credentials: 'include',  
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': await getCsrfToken()
+      },
       body: JSON.stringify({ email, password, username, invite_token })
     });
 
